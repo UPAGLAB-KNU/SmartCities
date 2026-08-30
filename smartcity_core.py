@@ -79,9 +79,9 @@ def add_groups(long):
         np.where(out["시군구명"].str.endswith("군", na=False), "군 지역", "시 지역"))
 
     pop = out.drop_duplicates("지역")[["지역", "인구규모"]]
-    q = pop["인구규모"].quantile([.25, .5, .75]).values
-    labels = ["소규모(하위 25%)", "중소규모", "중규모", "대규모(상위 25%)"]
-    pop["인구규모군"] = pd.cut(pop["인구규모"], [-np.inf, *q, np.inf], labels=labels)
+    bins = [-np.inf, 100_000, 300_000, 500_000, np.inf]
+    labels = ["10만 미만", "10만~30만", "30만~50만", "50만 이상"]
+    pop["인구규모군"] = pd.cut(pop["인구규모"], bins, labels=labels)
     return out.merge(pop[["지역", "인구규모군"]], on="지역", how="left")
 
 
