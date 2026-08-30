@@ -176,7 +176,7 @@ with right:
         geojson=geo, locations=sub["지역"], z=sub[mode].clip(zmin, zmax),
         featureidkey="properties.지역",
         colorscale="Blues", zmin=zmin, zmax=zmax,
-        marker_line_color="white", marker_line_width=0.4,
+        marker_line_color=""#8c8c8c", marker_line_width=0.5,
         colorbar=dict(title=mode, thickness=12, len=0.6, x=0.93, y=0.35),
         customdata=np.stack([sub["원자료"], sub["T점수"], sub["백분위"]], axis=-1),
         hovertemplate="<b>%{location}</b><br>원자료 %{customdata[0]:.2f}"
