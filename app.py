@@ -226,7 +226,9 @@ with right:
         pmap = (key.merge(sub[cols_need].rename(columns={"지역": "단위"}),
                           on="단위", how="inner")
                 .rename(columns={"시군구": "지역"}))
-
+    zmax = CUT
+    zmin = 40 if mode == "T점수" else float(pmap[mode].min())
+           
     fig3 = go.Figure(go.Choropleth(
         geojson=geo, locations=pmap["지역"], z=pmap[mode].clip(zmin, zmax),
         featureidkey="properties.지역",
