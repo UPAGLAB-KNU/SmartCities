@@ -214,17 +214,18 @@ with right:
     st.subheader("공간분포")
     geo = load_geo()
 
-    if is_sgg:
-        pmap = sub[["지역", mode, "원자료", "T점수", "백분위"]].copy()
-    else:                                        # 집계값을 소속 시군구에 펼침
-        key = raw.drop_duplicates("지역")[["지역", level_col]].rename(
-            columns={"지역": "시군구", level_col: "지역"})
-        pmap = (key.merge(sub[["지역", mode, "원자료", "T점수", "백분위"]],
-                          on="지역", how="inner")
-                .rename(columns={"지역": "단위", "시군구": "지역"}))
+    cols_need = ["지역", mode, "원자료", "T점수", "백분위"]
+    cols_need = list(dict.fromkeys(cols_need))          # mode 중복 제거
 
-    zmax = CUT
-    zmin = 40 if mode == "T점수" else float(pmap[mode].min())
+    if is_sgg:
+        pmap = sub[cols_need].copy()
+        pmap["단위"] = pmap["지역"]
+    else:                                        # 집계값을 소속 시군구에 펼침
+        key = (raw.drop_duplicates("지역")[["지역", level_col]]
+               .rename(columns={"지역": "시군구", level_col: "단위"}))
+        pmap = (key.merge(sub[cols_need].rename(columns={"지역": "단위"}),
+                          on="단위", how="inner")
+                .rename(columns={"시군구": "지역"}))
 
     fig3 = go.Figure(go.Choropleth(
         geojson=geo, locations=pmap["지역"], z=pmap[mode].clip(zmin, zmax),
@@ -247,8 +248,7 @@ with right:
             hovertemplate="<b>%{location}</b><br>자료 없음<extra></extra>"))
 
     if target:
-        hl = pmap.loc[pmap["지역"] == target, "지역"].tolist() if is_sgg else \
-             pmap.loc[pmap["단위"] == target, "지역"].tolist()
+        hl = pmap.loc[pmap["단위"] == target, "지역"].tolist()
         if hl:
             fig3.add_trace(go.Choropleth(
                 geojson=geo, locations=hl, z=[1] * len(hl),
