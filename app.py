@@ -188,8 +188,8 @@ with right:
         fig3.add_trace(go.Choropleth(
             geojson=geo, locations=miss["지역"], z=[0] * len(miss),
             featureidkey="properties.지역",
-            colorscale=[[0, "#e8e8e8"], [1, "#e8e8e8"]], showscale=False,
-            marker_line_color="#5a5a5a", marker_line_width=1.2,
+            colorscale=[[0, "#ffffff"], [1, "#ffffff"]], showscale=False,
+            marker_line_color="#8c8c8c", marker_line_width=0.5,
             hovertemplate="<b>%{location}</b><br>자료 없음<extra></extra>"))
     if target and not mine.empty:
         fig3.add_trace(go.Choropleth(
