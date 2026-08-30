@@ -176,7 +176,7 @@ with right:
         geojson=geo, locations=sub["지역"], z=sub[mode].clip(zmin, zmax),
         featureidkey="properties.지역",
         colorscale="Blues", zmin=zmin, zmax=zmax,
-        marker_line_color=""#8c8c8c", marker_line_width=0.5,
+        marker_line_color="#8c8c8c", marker_line_width=0.5,
         colorbar=dict(title=mode, thickness=12, len=0.6, x=0.93, y=0.35),
         customdata=np.stack([sub["원자료"], sub["T점수"], sub["백분위"]], axis=-1),
         hovertemplate="<b>%{location}</b><br>원자료 %{customdata[0]:.2f}"
@@ -188,8 +188,8 @@ with right:
         fig3.add_trace(go.Choropleth(
             geojson=geo, locations=miss["지역"], z=[0] * len(miss),
             featureidkey="properties.지역",
-            colorscale=[[0, "#d9d9d9"], [1, "#d9d9d9"]], showscale=False,
-            marker_line_color="white", marker_line_width=0.4,
+            colorscale=[[0, "#e8e8e8"], [1, "#e8e8e8"]], showscale=False,
+            marker_line_color="#5a5a5a", marker_line_width=1.2,
             hovertemplate="<b>%{location}</b><br>자료 없음<extra></extra>"))
     if target and not mine.empty:
         fig3.add_trace(go.Choropleth(
