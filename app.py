@@ -165,6 +165,7 @@ with left:
                       margin=dict(t=40, b=40))
     st.plotly_chart(fig, use_container_width=True)
 
+
 with right:
     st.subheader("전국 공간분포")
     geo = load_geo()
@@ -182,6 +183,14 @@ with right:
                       "<br>T점수 %{customdata[1]:.1f}"
                       "<br>상위 %{customdata[2]:.0f}%<extra></extra>"))
 
+    miss = base[(base["지표명"] == ind) & (base[mode].isna())]
+    if not miss.empty:
+        fig3.add_trace(go.Choropleth(
+            geojson=geo, locations=miss["지역"], z=[0] * len(miss),
+            featureidkey="properties.지역",
+            colorscale=[[0, "#d9d9d9"], [1, "#d9d9d9"]], showscale=False,
+            marker_line_color="white", marker_line_width=0.4,
+            hovertemplate="<b>%{location}</b><br>자료 없음<extra></extra>"))
     if target and not mine.empty:
         fig3.add_trace(go.Choropleth(
             geojson=geo, locations=[target], z=[1], featureidkey="properties.지역",
