@@ -233,7 +233,7 @@ with right:
         geojson=geo, locations=pmap["지역"], z=pmap[mode].clip(zmin, zmax),
         featureidkey="properties.지역",
         colorscale="Blues", zmin=zmin, zmax=zmax,
-        marker_line_color="white", marker_line_width=0.4,
+        marker_line_color="#8c8c8c", marker_line_width=0.5,
         colorbar=dict(title=mode, thickness=12, len=0.6, x=0.93, y=0.35),
         customdata=np.stack([pmap["원자료"], pmap["T점수"], pmap["백분위"]], axis=-1),
         hovertemplate="<b>%{location}</b><br>원자료 %{customdata[0]:.2f}"
@@ -246,7 +246,7 @@ with right:
             geojson=geo, locations=list(miss), z=[0] * len(miss),
             featureidkey="properties.지역",
             colorscale=[[0, "#ffffff"], [1, "#ffffff"]], showscale=False,
-            marker_line_color="white", marker_line_width=0.4,
+            marker_line_color="#8c8c8c", marker_line_width=0.5,
             hovertemplate="<b>%{location}</b><br>자료 없음<extra></extra>"))
 
     if target:
