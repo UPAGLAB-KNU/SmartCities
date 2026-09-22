@@ -315,23 +315,36 @@ if not is_sgg:
 
     hfig = go.Figure(go.Heatmap(
         z=zval, x=(edges[:-1] + edges[1:]) / 2, y=rows,
-        colorscale="Greys", zmin=0, xgap=1, ygap=1,
+        colorscale="Greys", zmin=0,
         text=cell, texttemplate="%{text}", textfont=dict(size=10),
         hovertext=hover, hovertemplate="%{hovertext}<extra></extra>",
         colorbar=dict(title=norm, thickness=12)))
 
     if mode == "T점수" and h_lo <= 50 <= h_hi:
-        hfig.add_vline(x=50, line_dash="dash", line_color="#D62728", line_width=1)
+        hfig.add_vline(x=50, line_dash="dash", line_color="gray", line_width=1,
+                       annotation_text="평균 50", annotation_position="top")
     if target and str(target) in rows:
         k = rows.index(str(target))
         hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=k - 0.5, y1=k + 0.5,
                        line=dict(color="#D62728", width=2))
 
-    hfig.update_layout(height=max(320, 30 * len(rows) + 140),
-                       xaxis=dict(title=f"{mode} (시군구 값)", showgrid=False, zeroline=False),
-                       yaxis=dict(type="category", showgrid=False),
-                       plot_bgcolor="#e3e3e3",      # 칸 사이 틈(xgap·ygap)이 옅은 격자선으로 보임
-                       margin=dict(l=10, t=20, b=40))
+    GRID = dict(color="#d0d0d0", width=0.6)
+    nr = len(rows)
+    for e in edges[1:-1]:                                  # 세로 격자선 (안쪽만)
+        hfig.add_shape(type="line", x0=e, x1=e, y0=-0.5, y1=nr - 0.5, line=GRID, layer="above")
+    for k in range(nr - 1):                                # 가로 격자선 (안쪽만)
+        hfig.add_shape(type="line", x0=edges[0], x1=edges[-1], y0=k + 0.5, y1=k + 0.5,
+                       line=GRID, layer="above")
+    hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=-0.5, y1=nr - 0.5,
+                   line=GRID, layer="above")               # 외곽선도 같은 굵기
+
+    hfig.update_layout(height=max(320, 30 * nr + 140),
+                       xaxis=dict(title=f"{mode} (시군구 값)", showgrid=False, zeroline=False,
+                                  showline=False, range=[edges[0], edges[-1]]),
+                       yaxis=dict(type="category", showgrid=False, showline=False,
+                                  range=[-0.5, nr - 0.5]),
+                       plot_bgcolor="rgba(0,0,0,0)",
+                       margin=dict(l=10, t=30, b=40))
     st.plotly_chart(hfig, use_container_width=True)
     st.caption("칸의 색 = 해당 급간에 속한 시군구 수. "
                + ("T점수는 전국 229개 시군구 기준으로 표준화한 값입니다. " if mode == "T점수" else "")
