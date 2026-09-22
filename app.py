@@ -277,7 +277,10 @@ if not is_sgg:
     hv["클래스"] = hv[level_col].astype(str)
 
     hc1, hc2, hc3 = st.columns(3)
-    nbin = hc1.select_slider("급간 수", options=[10, 15, 20, 30, 40], value=20)
+    if mode == "T점수":                                   # T점수는 정수 폭으로 급간 설정
+        bw = hc1.select_slider("급간 폭 (T점수)", options=[1, 2, 5, 10], value=2)
+    else:
+        nbin = hc1.select_slider("급간 수", options=[10, 15, 20, 30, 40], value=20)
     norm = hc2.radio("색상 기준", ["시군구 수", "클래스 내 비율(%)"], horizontal=True)
     if mode == "T점수":
         hcut = float(hc3.select_slider("상한 (T점수)",
@@ -288,9 +291,15 @@ if not is_sgg:
         hcut = float(hv[mode].quantile(hp / 100))
 
     hx = hv[mode].clip(upper=hcut)
-    h_lo = float(hx.min())
-    h_hi = hcut if hcut > h_lo else h_lo + 1
-    edges = np.linspace(h_lo, h_hi, nbin + 1)
+    if mode == "T점수":                                   # 상한에서 거꾸로 정수 폭만큼 → 경계가 모두 정수
+        h_hi = hcut
+        nbin = max(1, int(np.ceil((h_hi - float(hx.min())) / bw)))
+        h_lo = h_hi - nbin * bw
+        edges = h_lo + bw * np.arange(nbin + 1, dtype=float)
+    else:
+        h_lo = float(hx.min())
+        h_hi = hcut if hcut > h_lo else h_lo + 1
+        edges = np.linspace(h_lo, h_hi, nbin + 1)
     hv["급간"] = pd.cut(hx, edges, include_lowest=True, labels=False)
     n_clip = int((hv[mode] > hcut).sum())
 
@@ -304,7 +313,7 @@ if not is_sgg:
     pct_m = np.divide(cnt * 100, tot, out=np.zeros_like(cnt), where=tot > 0)
     zval = cnt if norm == "시군구 수" else pct_m
 
-    fe = (lambda v: f"{v:.1f}") if mode == "T점수" else (lambda v: f"{v:,.4g}")
+    fe = (lambda v: f"{v:.0f}") if mode == "T점수" else (lambda v: f"{v:,.4g}")
     hover = [[f"<b>{rows[i]}</b><br>{fe(edges[j])} ~ {fe(edges[j + 1])}"
               + (" (상한 초과 포함)" if j == nbin - 1 and n_clip else "")
               + f"<br>{int(cnt[i, j])}곳 · 클래스 내 {pct_m[i, j]:.0f}%"
