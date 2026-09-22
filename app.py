@@ -325,9 +325,9 @@ if not is_sgg:
     hfig = go.Figure(go.Heatmap(
         z=zval, x=(edges[:-1] + edges[1:]) / 2, y=rows,
         colorscale="Greys", zmin=0,
-        text=cell, texttemplate="%{text}", textfont=dict(size=10),
+        text=cell, texttemplate="%{text}", textfont=dict(size=9),
         hovertext=hover, hovertemplate="%{hovertext}<extra></extra>",
-        colorbar=dict(title=norm, thickness=12)))
+        colorbar=dict(title=dict(text=norm, side="right"), thickness=10)))
 
     if mode == "T점수" and h_lo <= 50 <= h_hi:
         hfig.add_vline(x=50, line_dash="dash", line_color="gray", line_width=1,
@@ -347,13 +347,15 @@ if not is_sgg:
     hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=-0.5, y1=nr - 0.5,
                    line=GRID, layer="above")               # 외곽선도 같은 굵기
 
-    hfig.update_layout(height=max(320, 30 * nr + 140),
+    ROW_H = 18                                             # 행 1개 높이(px)
+    hfig.update_layout(height=ROW_H * nr + 90,
                        xaxis=dict(title=f"{mode} (시군구 값)", showgrid=False, zeroline=False,
                                   showline=False, range=[edges[0], edges[-1]]),
                        yaxis=dict(type="category", showgrid=False, showline=False,
                                   range=[-0.5, nr - 0.5]),
                        plot_bgcolor="rgba(0,0,0,0)",
-                       margin=dict(l=10, t=30, b=40))
+                       font=dict(size=11),
+                       margin=dict(l=10, t=24, b=36))
     st.plotly_chart(hfig, use_container_width=True)
     st.caption("칸의 색 = 해당 급간에 속한 시군구 수. "
                + ("T점수는 전국 229개 시군구 기준으로 표준화한 값입니다. " if mode == "T점수" else "")
