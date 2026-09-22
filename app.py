@@ -266,6 +266,77 @@ with right:
     fig3.update_layout(height=640, margin=dict(l=0, r=0, t=40, b=0))
     st.plotly_chart(fig3, use_container_width=True)
 
+# ── 클래스별 시군구 분포 히트맵 (시도별·도시규모별·수도권-비수도권)
+if not is_sgg:
+    st.divider()
+    st.subheader(f"{level} 시군구 분포")
+
+    sgg_t = core.add_tscore(raw)                         # 시군구 T점수는 전국 기준
+    hv = sgg_t[sgg_t["지표명"] == ind].dropna(subset=[mode]).copy()
+    hv = hv[hv[level_col].notna()]
+    hv["클래스"] = hv[level_col].astype(str)
+
+    hc1, hc2, hc3 = st.columns(3)
+    nbin = hc1.select_slider("급간 수", options=[10, 15, 20, 30, 40], value=20)
+    norm = hc2.radio("색상 기준", ["시군구 수", "클래스 내 비율(%)"], horizontal=True)
+    if mode == "T점수":
+        hcut = float(hc3.select_slider("상한 (T점수)",
+                                       options=[55, 60, 65, 70, 75, 80], value=70))
+    else:
+        hp = hc3.select_slider("상한 (상위 백분위)",
+                               options=[80, 85, 90, 95, 99, 100], value=95)
+        hcut = float(hv[mode].quantile(hp / 100))
+
+    hx = hv[mode].clip(upper=hcut)
+    h_lo = float(hx.min())
+    h_hi = hcut if hcut > h_lo else h_lo + 1
+    edges = np.linspace(h_lo, h_hi, nbin + 1)
+    hv["급간"] = pd.cut(hx, edges, include_lowest=True, labels=False)
+    n_clip = int((hv[mode] > hcut).sum())
+
+    rows = [str(r) for r in d["지역"]]                    # 막대그래프와 같은 순서
+    rows = sorted(set(hv["클래스"]) - set(rows)) + rows
+
+    ct = (hv.groupby(["클래스", "급간"]).size().unstack(fill_value=0)
+          .reindex(index=rows, columns=range(nbin), fill_value=0))
+    cnt = ct.values.astype(float)
+    tot = cnt.sum(axis=1, keepdims=True)
+    pct_m = np.divide(cnt * 100, tot, out=np.zeros_like(cnt), where=tot > 0)
+    zval = cnt if norm == "시군구 수" else pct_m
+
+    fe = (lambda v: f"{v:.1f}") if mode == "T점수" else (lambda v: f"{v:,.4g}")
+    hover = [[f"<b>{rows[i]}</b><br>{fe(edges[j])} ~ {fe(edges[j + 1])}"
+              + (" (상한 초과 포함)" if j == nbin - 1 and n_clip else "")
+              + f"<br>{int(cnt[i, j])}곳 · 클래스 내 {pct_m[i, j]:.0f}%"
+              for j in range(nbin)] for i in range(len(rows))]
+    cell = [[("" if cnt[i, j] == 0 else
+              (f"{int(cnt[i, j])}" if norm == "시군구 수" else f"{pct_m[i, j]:.0f}"))
+             for j in range(nbin)] for i in range(len(rows))]
+
+    hfig = go.Figure(go.Heatmap(
+        z=zval, x=(edges[:-1] + edges[1:]) / 2, y=rows,
+        colorscale="Greys", zmin=0, xgap=1, ygap=1,
+        text=cell, texttemplate="%{text}", textfont=dict(size=10),
+        hovertext=hover, hovertemplate="%{hovertext}<extra></extra>",
+        colorbar=dict(title=norm, thickness=12)))
+
+    if mode == "T점수" and h_lo <= 50 <= h_hi:
+        hfig.add_vline(x=50, line_dash="dash", line_color="#D62728", line_width=1)
+    if target and str(target) in rows:
+        k = rows.index(str(target))
+        hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=k - 0.5, y1=k + 0.5,
+                       line=dict(color="#D62728", width=2))
+
+    hfig.update_layout(height=max(320, 30 * len(rows) + 140),
+                       xaxis_title=f"{mode} (시군구 값)",
+                       yaxis=dict(type="category"),
+                       margin=dict(l=10, t=20, b=40))
+    st.plotly_chart(hfig, use_container_width=True)
+    st.caption("칸의 색 = 해당 급간에 속한 시군구 수. "
+               + ("T점수는 전국 229개 시군구 기준으로 표준화한 값입니다. " if mode == "T점수" else "")
+               + (f"마지막 급간에는 상한 초과 {n_clip}곳이 포함됩니다. " if n_clip else "")
+               + "클래스마다 시군구 수가 달라 비교가 어려우면 '클래스 내 비율'로 바꿔 보세요.")
+
 # ── 지역 진단
 if target and not mine.empty:
     st.divider()
