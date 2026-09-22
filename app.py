@@ -328,8 +328,9 @@ if not is_sgg:
                        line=dict(color="#D62728", width=2))
 
     hfig.update_layout(height=max(320, 30 * len(rows) + 140),
-                       xaxis_title=f"{mode} (시군구 값)",
-                       yaxis=dict(type="category"),
+                       xaxis=dict(title=f"{mode} (시군구 값)", showgrid=False, zeroline=False),
+                       yaxis=dict(type="category", showgrid=False),
+                       plot_bgcolor="#e3e3e3",      # 칸 사이 틈(xgap·ygap)이 옅은 격자선으로 보임
                        margin=dict(l=10, t=20, b=40))
     st.plotly_chart(hfig, use_container_width=True)
     st.caption("칸의 색 = 해당 급간에 속한 시군구 수. "
