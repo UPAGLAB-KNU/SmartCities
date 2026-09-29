@@ -447,8 +447,19 @@ if is_sgg:
         else:
             st.caption(f"{group} 비교집단 · 지표 가중치 적용 (현재 기본값 1)")
         score_tbl = score_tbl[["지역", "항목", "Min-Max점수", "T점수", "지표수", "가중치합"]]
+
+        # wide 형식: 지역을 행으로, 분야 및 종합을 열로 표시
+        item_order = list(field_scores["항목"].dropna().drop_duplicates()) + ["종합"]
+        wide = score_tbl.pivot(index="지역", columns="항목", values=["Min-Max점수", "T점수"])
+        wide = wide.reindex(columns=pd.MultiIndex.from_product(
+            [["Min-Max점수", "T점수"], [c for c in item_order if c in score_tbl["항목"].values]]
+        ))
+        wide.columns = [f"{score_type} | {item}" for score_type, item in wide.columns]
+        wide = wide.reset_index()
+
+        fmt = {c: "{:.1f}" for c in wide.columns if c != "지역"}
         st.dataframe(
-            score_tbl.style.format({"Min-Max점수": "{:.1f}", "T점수": "{:.1f}", "가중치합": "{:.1f}"}),
+            wide.style.format(fmt),
             use_container_width=True, hide_index=True, height=520)
 
 st.divider()
