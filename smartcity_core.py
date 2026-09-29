@@ -289,7 +289,11 @@ def add_all_scores(long, group_col=None, t_lo=T_AGG_LO, t_hi=T_AGG_HI):
 
 def _weighted_group_score(g, value_col):
     """결측과 가중치 0을 제외한 가중평균 및 진단값."""
-    w = pd.to_numeric(g.get("가중치", 1.0), errors="coerce").fillna(1.0)
+    if "가중치" in g.columns:
+        w = pd.to_numeric(g["가중치"], errors="coerce").fillna(1.0)
+    else:
+        # 이전 캐시/구버전 raw에도 안전하게 동작. 현재 기본 가중치는 모두 1.
+        w = pd.Series(1.0, index=g.index, dtype="float64")
     x = pd.to_numeric(g[value_col], errors="coerce")
     ok = x.notna() & w.notna() & (w > 0)
     if not ok.any() or w.loc[ok].sum() <= 0:
