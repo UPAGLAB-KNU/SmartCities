@@ -54,6 +54,12 @@ def load_definitions(raw):
         if c not in df.columns:
             df[c] = ""
 
+    # 시군구지표정의 L열의 가중치 사용. 헤더가 없으면 L열 값을 직접 사용하고,
+    # 값이 비어 있으면 기본값 1로 처리한다.
+    if "가중치" not in df.columns:
+        df["가중치"] = df.iloc[:, 11] if df.shape[1] > 11 else 1.0
+    df["가중치"] = pd.to_numeric(df["가중치"], errors="coerce").fillna(1.0)
+
     df = df[df["지표명"].astype(str).str.strip() != ""].reset_index(drop=True)
     df["col_idx"] = df["열번호"].map(col_to_idx)
     df = df[df["col_idx"].notna()].copy()
@@ -91,7 +97,7 @@ def load_values(defs, raw):
     long = long[valid]
     return long.merge(
         use[["지표명", "대분류", "데이터유형", "의미", "방향", "유형",
-             "집계_분모", "집계방식"]], on="지표명", how="left")
+             "집계_분모", "집계방식", "가중치"]], on="지표명", how="left")
 
 
 def load_denominators(raw):
@@ -182,6 +188,7 @@ def aggregate(long, level_col, denom=None, sido_actual=None):
         rows.append({level_col: grp, "지역": grp, "지표명": ind, "원자료": val,
                      "대분류": meta["대분류"], "데이터유형": meta["데이터유형"],
                      "의미": meta["의미"], "방향": meta["방향"], "유형": meta["유형"],
+                     "가중치": meta.get("가중치", 1.0),
                      "집계방식": how, "집계상세": detail, "구성지역수": n_valid,
                      "출처": "집계"})
 
@@ -208,6 +215,101 @@ def add_tscore(long, group_col=None):
     out["T점수"] = 50 + 10 * out["Z점수"]
     out["백분위"] = out.groupby(keys)["Z점수"].rank(pct=True) * 100
     return out
+
+
+def add_minmax(long, group_col=None):
+    """지표별 Min-Max 0~100 점수. 방향을 반영하고, 상수 지표는 50점 처리."""
+    out = long.copy()
+    keys = ["지표명"] + ([group_col] if group_col else [])
+    g = out.groupby(keys)["원자료"]
+    lo = g.transform("min")
+    hi = g.transform("max")
+    span = hi - lo
+    mm = (out["원자료"] - lo) / span.replace(0, np.nan) * 100
+    mm = np.where((span == 0) & out["원자료"].notna(), 50.0, mm)
+    out["Min-Max"] = np.where(out["방향"] >= 0, mm, 100 - mm)
+    return out
+
+
+def _weighted_average(g, value_col):
+    """결측을 제외한 지표 가중평균. 가중치가 없으면 모두 1."""
+    v = pd.to_numeric(g[value_col], errors="coerce")
+    if "가중치" in g.columns:
+        w = pd.to_numeric(g["가중치"], errors="coerce").fillna(1.0)
+    else:
+        w = pd.Series(1.0, index=g.index, dtype=float)
+    m = v.notna() & w.notna() & (w >= 0)
+    if not m.any() or w[m].sum() == 0:
+        return np.nan
+    return float((v[m] * w[m]).sum() / w[m].sum())
+
+
+def _restandardize(series):
+    """평균 50, 표준편차 10의 T점수로 재표준화. 분산이 0이면 50."""
+    s = pd.to_numeric(series, errors="coerce")
+    mean = s.mean()
+    sd = s.std()
+    if pd.isna(sd) or sd == 0:
+        return pd.Series(np.where(s.notna(), 50.0, np.nan), index=s.index)
+    return 50 + 10 * (s - mean) / sd
+
+
+def build_field_total_scores(scored):
+    """
+    시군구(또는 현재 비교집단) 자료에서 분야별·종합 점수를 산출.
+    - Min-Max: 개별 Min-Max 점수의 가중평균
+    - T 방식: 개별 T를 S=clip(100*(T-20)/60, 0, 100)으로 환산해 가중평균 후
+      분야 및 종합 점수를 다시 T점수화
+    """
+    d = scored.copy()
+    if "Min-Max" not in d.columns:
+        d = add_minmax(d)
+    if "T점수" not in d.columns:
+        d = add_tscore(d)
+
+    d["T합산점수"] = ((d["T점수"] - 20) / 60 * 100).clip(0, 100)
+
+    # 분야별
+    rows = []
+    for (region, field), g in d.groupby(["지역", "대분류"], observed=True):
+        w = (pd.to_numeric(g["가중치"], errors="coerce").fillna(1.0)
+             if "가중치" in g.columns else pd.Series(1.0, index=g.index))
+        valid_w = w[g["Min-Max"].notna()]
+        rows.append({
+            "지역": region,
+            "항목": field,
+            "Min-Max점수": _weighted_average(g, "Min-Max"),
+            "T원점수": _weighted_average(g, "T합산점수"),
+            "지표수": int(g["지표명"].nunique()),
+            "가중치합": float(valid_w.sum()) if len(valid_w) else 0.0,
+        })
+    field = pd.DataFrame(rows)
+    if not field.empty:
+        field["T점수"] = field.groupby("항목", group_keys=False)["T원점수"].transform(_restandardize)
+        field["백분위_MinMax"] = field.groupby("항목")["Min-Max점수"].rank(pct=True) * 100
+        field["백분위_T"] = field.groupby("항목")["T점수"].rank(pct=True) * 100
+
+    # 종합: 분야평균이 아니라 전체 개별지표에 각 지표 가중치를 직접 적용
+    rows = []
+    for region, g in d.groupby("지역", observed=True):
+        w = (pd.to_numeric(g["가중치"], errors="coerce").fillna(1.0)
+             if "가중치" in g.columns else pd.Series(1.0, index=g.index))
+        valid_w = w[g["Min-Max"].notna()]
+        rows.append({
+            "지역": region,
+            "항목": "종합",
+            "Min-Max점수": _weighted_average(g, "Min-Max"),
+            "T원점수": _weighted_average(g, "T합산점수"),
+            "지표수": int(g["지표명"].nunique()),
+            "가중치합": float(valid_w.sum()) if len(valid_w) else 0.0,
+        })
+    total = pd.DataFrame(rows)
+    if not total.empty:
+        total["T점수"] = _restandardize(total["T원점수"])
+        total["백분위_MinMax"] = total["Min-Max점수"].rank(pct=True) * 100
+        total["백분위_T"] = total["T점수"].rank(pct=True) * 100
+
+    return field, total
 
 
 def build_base(sheet_id):
