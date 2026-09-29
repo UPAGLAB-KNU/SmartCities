@@ -64,7 +64,7 @@ c1, c2, c3 = st.columns([2, 3, 1.5])
 cat = c1.selectbox("대분류", ["전체"] + sorted(raw["대분류"].dropna().unique()))
 pool = raw if cat == "전체" else raw[raw["대분류"] == cat]
 ind = c2.selectbox("지표", sorted(pool["지표명"].unique()))
-mode = c3.radio("값 기준", ["T점수", "원자료"], horizontal=True)
+mode = c3.radio("값 기준", ["T점수", "Min-Max", "원자료"], horizontal=True)
 
 # ── 2행: 집계 수준
 level = st.selectbox("집계 수준",
@@ -115,7 +115,7 @@ if is_sgg:
 else:
     subset = agg
 
-base = core.add_tscore(subset)
+base = core.add_minmax(core.add_tscore(subset))
 sub = base[base["지표명"] == ind].dropna(subset=[mode])
 
 cap = f"{level} · 비교집단 {group} · 유효 {len(sub)}개 / 전체 {base['지역'].nunique()}개"
@@ -136,12 +136,12 @@ q = sub[mode].describe()
 cols = st.columns(6 if target else 5)
 for i, (lab, v) in enumerate([("최소", q["min"]), ("25%", q["25%"]), ("중앙값", q["50%"]),
                               ("75%", q["75%"]), ("평균", q["mean"])]):
-    cols[i].metric(lab, f"{v:,.1f}" if mode == "T점수" else f"{v:,.4g}")
+    cols[i].metric(lab, f"{v:,.1f}" if mode in ["T점수", "Min-Max"] else f"{v:,.4g}")
 
 mine = sub[sub["지역"] == target] if target else pd.DataFrame()
 if target and not mine.empty:
     val, pct = float(mine[mode].iloc[0]), mine["백분위"].iloc[0]
-    cols[5].metric(label, f"{val:,.1f}" if mode == "T점수" else f"{val:,.4g}",
+    cols[5].metric(label, f"{val:,.1f}" if mode in ["T점수", "Min-Max"] else f"{val:,.4g}",
                    f"상위 {100-pct:.0f}%")
 elif target:
     cols[5].metric(label, "값 없음")
@@ -199,7 +199,7 @@ with left:
                   for r, v in zip(d["지역"], d[mode])]
         fig = go.Figure(go.Bar(
             x=d[mode], y=d["지역"], orientation="h", marker_color=colors,
-            text=[f"{v:,.1f}" if mode == "T점수" else f"{v:,.4g}" for v in d[mode]],
+            text=[f"{v:,.1f}" if mode in ["T점수", "Min-Max"] else f"{v:,.4g}" for v in d[mode]],
             textposition="outside",
             customdata=np.stack([d["구성지역수"], d["출처"]], axis=-1),
             hovertemplate="<b>%{y}</b><br>%{x:.2f}"
@@ -366,31 +366,43 @@ if not is_sgg:
 if target and not mine.empty:
     st.divider()
     st.subheader(f"{target} 진단")
-    st.caption("범주 종합점수는 단위가 다른 지표를 합산하므로 T점수 기준으로만 산출됩니다.")
+    # 분야점수는 위에서 선택한 방식과 동일한 산식으로 계산한다.
+    # 원자료 보기에서는 기존 T점수 기반 진단을 그대로 유지한다.
+    field_scores, total_scores = core.build_field_total_scores(base)
     mine_all = base[base["지역"] == target].dropna(subset=["T점수"])
 
-    if cat == "전체":
-        plot = (mine_all.groupby("대분류")
-                .agg(Z=("Z점수", "mean"), 백분위=("백분위", "mean"),
-                     지표수=("지표명", "count"))
-                .reset_index().rename(columns={"대분류": "항목"}))
-        plot["T점수"] = 50 + 10 * plot["Z"]
+    if cat == "전체" and mode in ["T점수", "Min-Max"]:
+        plot = field_scores[field_scores["지역"] == target].copy()
+        score_col = "T점수" if mode == "T점수" else "Min-Max점수"
+        pct_col = "백분위_T" if mode == "T점수" else "백분위_MinMax"
+        plot = plot[["항목", score_col, pct_col, "지표수"]].rename(
+            columns={score_col: "점수", pct_col: "백분위"})
+        axis_title = mode
     else:
-        plot = (mine_all[mine_all["대분류"] == cat][["지표명", "T점수", "백분위"]]
-                .rename(columns={"지표명": "항목"}))
-        plot["지표수"] = 1
+        if cat == "전체":
+            plot = (mine_all.groupby("대분류")
+                    .agg(Z=("Z점수", "mean"), 백분위=("백분위", "mean"),
+                         지표수=("지표명", "count"))
+                    .reset_index().rename(columns={"대분류": "항목"}))
+            plot["점수"] = 50 + 10 * plot["Z"]
+        else:
+            score_col = "Min-Max" if mode == "Min-Max" else "T점수"
+            plot = (mine_all[mine_all["대분류"] == cat][["지표명", score_col, "백분위"]]
+                    .rename(columns={"지표명": "항목", score_col: "점수"}))
+            plot["지표수"] = 1
+        axis_title = "T점수" if mode == "원자료" else mode
 
     order = st.radio("정렬", ["높은 값 순", "낮은 값 순"], horizontal=True)
-    plot = plot.sort_values("T점수", ascending=(order == "낮은 값 순"))
+    plot = plot.sort_values("점수", ascending=(order == "낮은 값 순"))
 
     fig2 = go.Figure(go.Bar(
-        x=plot["T점수"], y=plot["항목"], orientation="h",
-        marker_color=np.where(plot["T점수"] >= 50, "#1F4E9C", "#9BB8DE"),
-        text=[f"{v:.0f}" for v in plot["T점수"]], textposition="outside"))
+        x=plot["점수"], y=plot["항목"], orientation="h",
+        marker_color=np.where(plot["점수"] >= 50, "#1F4E9C", "#9BB8DE"),
+        text=[f"{v:.0f}" for v in plot["점수"]], textposition="outside"))
     fig2.add_vline(x=50, line_dash="dash", line_color="gray")
-    b_lo, b_hi = plot["T점수"].min(), plot["T점수"].max()
+    b_lo, b_hi = plot["점수"].min(), plot["점수"].max()
     pad = max(3, (b_hi - b_lo) * 0.25)
-    fig2.update_layout(height=max(300, 45 * len(plot)), xaxis_title="T점수",
+    fig2.update_layout(height=max(300, 45 * len(plot)), xaxis_title=axis_title,
                        xaxis_range=[b_lo - pad, b_hi + pad],
                        margin=dict(l=10, t=30, b=40))
     st.plotly_chart(fig2, use_container_width=True)
@@ -399,7 +411,7 @@ if target and not mine.empty:
     plot[pos] = plot["백분위"].apply(
         lambda p: "중간" if 40 <= p <= 60 else
         (f"상위 {100-p:.0f}%" if p > 60 else f"하위 {p:.0f}%"))
-    st.dataframe(plot[["항목", "T점수", pos, "지표수"]].style.format({"T점수": "{:.1f}"}),
+    st.dataframe(plot[["항목", "점수", pos, "지표수"]].style.format({"점수": "{:.1f}"}),
                  use_container_width=True, hide_index=True)
 else:
     st.info("지역을 선택하면 상세 진단이 표시됩니다.")
@@ -409,7 +421,7 @@ st.divider()
 with st.expander("세부지표 전체 보기", expanded=False):
     view = base if cat == "전체" else base[base["대분류"] == cat]
     if target:
-        c = ["대분류", "지표명", "원자료", "T점수", "백분위"]
+        c = ["대분류", "지표명", "원자료", "Min-Max", "T점수", "백분위"]
         if not is_sgg:
             c += ["집계방식", "구성지역수", "출처"]
         tbl = view[view["지역"] == target][c].sort_values(["대분류", "지표명"])
@@ -423,6 +435,21 @@ with st.expander("세부지표 전체 보기", expanded=False):
                        tbl.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"smartcity_{level}_{cat}_{mode}.csv",
                        mime="text/csv")
+
+# ── 분야별·종합 점수 보기 (시군구 수준)
+if is_sgg:
+    with st.expander("분야별·종합 점수 보기", expanded=False):
+        field_scores, total_scores = core.build_field_total_scores(base)
+        score_tbl = pd.concat([field_scores, total_scores], ignore_index=True)
+        if target:
+            score_tbl = score_tbl[score_tbl["지역"] == target]
+            st.caption(f"{target} · 지표 가중치 적용 (현재 기본값 1)")
+        else:
+            st.caption(f"{group} 비교집단 · 지표 가중치 적용 (현재 기본값 1)")
+        score_tbl = score_tbl[["지역", "항목", "Min-Max점수", "T점수", "지표수", "가중치합"]]
+        st.dataframe(
+            score_tbl.style.format({"Min-Max점수": "{:.1f}", "T점수": "{:.1f}", "가중치합": "{:.1f}"}),
+            use_container_width=True, hide_index=True, height=520)
 
 st.divider()
 st.caption(f"{FORMULA} · 데이터 기준 {ts:%Y-%m-%d %H:%M:%S}")
