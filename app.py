@@ -22,9 +22,121 @@ def fetch(sheet_id):
     return core.build_base(sheet_id), datetime.now()
 
 
+# ── 점수 계산 호환 계층
+# app.py만 먼저 배포되어 예전 smartcity_core.py가 남아 있어도 앱이 중단되지 않도록
+# 시군구 점수 계산에 필요한 함수를 app.py 안에도 보유합니다.
+def _safe_z(s):
+    s = pd.to_numeric(s, errors="coerce")
+    sd = s.std(ddof=1)
+    if pd.isna(sd) or sd == 0:
+        return pd.Series(np.where(s.notna(), 0.0, np.nan), index=s.index, dtype="float64")
+    return (s - s.mean()) / sd
+
+
+def _add_all_scores_compat(long, t_lo=20.0, t_hi=80.0):
+    out = long.copy()
+    if "가중치" not in out.columns:
+        out["가중치"] = 1.0
+    out["가중치"] = pd.to_numeric(out["가중치"], errors="coerce").fillna(1.0).clip(lower=0)
+    if "방향" not in out.columns:
+        out["방향"] = 1.0
+    out["방향"] = pd.to_numeric(out["방향"], errors="coerce").fillna(1.0)
+
+    # 지표별 Min-Max (상수 지표는 중립 50)
+    g = out.groupby("지표명", observed=True)["원자료"]
+    lo = g.transform("min")
+    hi = g.transform("max")
+    rng = hi - lo
+    mm = 100 * (out["원자료"] - lo) / rng.replace(0, np.nan)
+    mm = pd.Series(np.where(out["방향"] < 0, 100 - mm, mm), index=out.index, dtype="float64")
+    mm.loc[out["원자료"].notna() & rng.eq(0)] = 50.0
+    out["MinMax점수"] = mm.clip(0, 100)
+    out["MinMax백분위"] = out.groupby("지표명", observed=True)["MinMax점수"].rank(pct=True) * 100
+
+    # 지표별 T점수 (상수/1개 표본은 중립 50)
+    mean = g.transform("mean")
+    sd = g.transform("std")
+    z = (out["원자료"] - mean) / sd.replace(0, np.nan)
+    neutral = out["원자료"].notna() & (sd.isna() | sd.eq(0))
+    z.loc[neutral] = 0.0
+    out["Z점수"] = z * out["방향"]
+    out["T점수"] = 50 + 10 * out["Z점수"]
+    out["백분위"] = out.groupby("지표명", observed=True)["T점수"].rank(pct=True) * 100
+
+    # 분야·종합 계산용: T=20→0, 50→50, 80→100, 그 밖은 0~100 절단
+    out["T합산점수"] = (100 * (out["T점수"] - t_lo) / (t_hi - t_lo)).clip(0, 100)
+    return out
+
+
+def _weighted_score(g, value_col):
+    x = pd.to_numeric(g[value_col], errors="coerce")
+    w = pd.to_numeric(g.get("가중치", 1.0), errors="coerce").fillna(1.0)
+    ok = x.notna() & w.notna() & (w > 0)
+    if not ok.any() or w.loc[ok].sum() <= 0:
+        return pd.Series({"점수": np.nan, "지표수": 0, "가중치합": 0.0})
+    return pd.Series({"점수": np.average(x.loc[ok], weights=w.loc[ok]),
+                      "지표수": int(ok.sum()), "가중치합": float(w.loc[ok].sum())})
+
+
+def _re_t(df, raw_col, by=None, out_col="T점수"):
+    out = df.copy()
+    pct_col = out_col[:-2] + "백분위" if out_col.endswith("점수") else out_col + "_백분위"
+    if by is None:
+        out[out_col] = 50 + 10 * _safe_z(out[raw_col])
+        out[pct_col] = out[out_col].rank(pct=True) * 100
+        return out
+    parts = []
+    for _, g in out.groupby(by, observed=True, dropna=False):
+        g = g.copy()
+        g[out_col] = 50 + 10 * _safe_z(g[raw_col])
+        g[pct_col] = g[out_col].rank(pct=True) * 100
+        parts.append(g)
+    return pd.concat(parts, ignore_index=True) if parts else out
+
+
+def _build_sgg_scores_compat(long):
+    detail = _add_all_scores_compat(long)
+
+    mmf = (detail.groupby(["지역", "대분류"], observed=True)
+           .apply(lambda g: _weighted_score(g, "MinMax점수"))
+           .reset_index()
+           .rename(columns={"점수":"MinMax분야점수", "지표수":"MinMax지표수", "가중치합":"MinMax가중치합"}))
+    tf = (detail.groupby(["지역", "대분류"], observed=True)
+          .apply(lambda g: _weighted_score(g, "T합산점수"))
+          .reset_index()
+          .rename(columns={"점수":"T분야원점수", "지표수":"T지표수", "가중치합":"T가중치합"}))
+    field = mmf.merge(tf, on=["지역", "대분류"], how="outer")
+    field = _re_t(field, "T분야원점수", by="대분류", out_col="T분야점수")
+
+    id_cols = [c for c in ["지역","시도명","시군구명","인구규모","인구규모군","유형구분","권역"] if c in long.columns]
+    ids = long.drop_duplicates("지역")[id_cols]
+    field = field.merge(ids, on="지역", how="left")
+
+    mmt = (detail.groupby("지역", observed=True)
+           .apply(lambda g: _weighted_score(g, "MinMax점수"))
+           .reset_index()
+           .rename(columns={"점수":"MinMax종합점수", "지표수":"MinMax지표수", "가중치합":"MinMax가중치합"}))
+    tt = (detail.groupby("지역", observed=True)
+          .apply(lambda g: _weighted_score(g, "T합산점수"))
+          .reset_index()
+          .rename(columns={"점수":"T종합원점수", "지표수":"T지표수", "가중치합":"T가중치합"}))
+    total = mmt.merge(tt, on="지역", how="outer")
+    total = _re_t(total, "T종합원점수", out_col="T종합점수")
+    total = total.merge(ids, on="지역", how="left")
+    return detail.reset_index(drop=True), field.reset_index(drop=True), total.reset_index(drop=True)
+
+
+def add_all_scores_any(long):
+    if hasattr(core, "add_all_scores"):
+        return core.add_all_scores(long)
+    return _add_all_scores_compat(long)
+
+
 @st.cache_data(show_spinner=False)
 def score_sgg(raw):
-    return core.build_sgg_scores(raw)
+    if hasattr(core, "build_sgg_scores"):
+        return core.build_sgg_scores(raw)
+    return _build_sgg_scores_compat(raw)
 
 
 def load(sheet_id):
@@ -140,7 +252,7 @@ if is_sgg:
     base = subset
 else:
     agg = core.aggregate(raw, level_col, denom, sido_actual)
-    base_all = core.add_all_scores(agg)
+    base_all = add_all_scores_any(agg)
     base = base_all
 
 sub = base[base["지표명"] == ind].dropna(subset=[score_col])
