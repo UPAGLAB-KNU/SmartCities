@@ -133,18 +133,18 @@ if sub.empty:
 
 # ── 요약통계
 q = sub[mode].describe()
-cols = st.columns(6 if target else 5)
+cols = st.columns(7 if target else 6)
 for i, (lab, v) in enumerate([("최소", q["min"]), ("25%", q["25%"]), ("중앙값", q["50%"]),
-                              ("75%", q["75%"]), ("평균", q["mean"])]):
+                              ("75%", q["75%"]), ("최대", q["max"]), ("평균", q["mean"])]):
     cols[i].metric(lab, f"{v:,.1f}" if mode in ["T점수", "Min-Max"] else f"{v:,.4g}")
 
 mine = sub[sub["지역"] == target] if target else pd.DataFrame()
 if target and not mine.empty:
     val, pct = float(mine[mode].iloc[0]), mine["백분위"].iloc[0]
-    cols[5].metric(label, f"{val:,.1f}" if mode in ["T점수", "Min-Max"] else f"{val:,.4g}",
+    cols[6].metric(label, f"{val:,.1f}" if mode in ["T점수", "Min-Max"] else f"{val:,.4g}",
                    f"상위 {100-pct:.0f}%")
 elif target:
-    cols[5].metric(label, "값 없음")
+    cols[6].metric(label, "값 없음")
     val = None
 else:
     val = None
