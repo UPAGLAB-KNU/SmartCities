@@ -230,15 +230,27 @@ if is_sgg and visual_target != "전체":
 
 
 @st.cache_data(show_spinner=False)
-def build_scores_cached(scored, group_col_arg=None):
-    """이미 표준화된 지표에서 부문·종합 점수를 계산하고 결과를 캐시한다."""
+def build_scores_cached(scored, group_col_arg=None, keep_composite_0_100=False):
+    """이미 표준화된 지표에서 부문·종합 점수를 계산하고 결과를 캐시한다.
+
+    keep_composite_0_100=True이면 상위 집계단위(시도·도시규모·권역)는
+    부문/종합 점수를 다시 T로 표준화하지 않고 직전 단계의 0~100 합산점수를 사용한다.
+    """
     field_scores, total_scores = core.build_field_total_scores(scored)
+
+    if keep_composite_0_100:
+        for df in (field_scores, total_scores):
+            # T기반 결합점수는 재표준화 직전의 0~100 T원점수를 그대로 사용한다.
+            df["T점수"] = df["T원점수"]
+            df["백분위_T"] = df["T원점수"].rank(pct=True) * 100
+            df["백분위_MinMax"] = df["Min-Max점수"].rank(pct=True) * 100
+        return field_scores, total_scores
+
     if group_col_arg is None:
         return field_scores, total_scores
 
     region_group = (scored.drop_duplicates("지역")[["지역", group_col_arg]]
                     .dropna(subset=[group_col_arg]))
-
     field_scores = field_scores.merge(region_group, on="지역", how="left")
     total_scores = total_scores.merge(region_group, on="지역", how="left")
 
@@ -247,10 +259,12 @@ def build_scores_cached(scored, group_col_arg=None):
         g = df.groupby(keys, observed=True)["T원점수"]
         mean = g.transform("mean")
         sd = g.transform("std")
+        count = g.transform("count")
         z = (df["T원점수"] - mean) / sd.replace(0, np.nan)
         df["T점수"] = 50 + 10 * z
-        zero = sd.eq(0) & df["T원점수"].notna()
-        df.loc[zero, "T점수"] = 50.0
+        # 유효 단위가 1개(예: 세종시) 또는 분산 0이면 중립값 50.
+        neutral = df["T원점수"].notna() & ((count <= 1) | sd.eq(0) | sd.isna())
+        df.loc[neutral, "T점수"] = 50.0
         df["백분위_T"] = df.groupby(keys, observed=True)["T점수"].rank(pct=True) * 100
         df["백분위_MinMax"] = df.groupby(keys, observed=True)["Min-Max점수"].rank(pct=True) * 100
         return df
@@ -263,7 +277,8 @@ def build_scores_cached(scored, group_col_arg=None):
 def build_scores_for_current_group(scored):
     """현재 비교집단의 캐시된 부문·종합 점수를 반환한다."""
     group_col_arg = score_group_col if is_sgg else None
-    return build_scores_cached(scored, group_col_arg)
+    return build_scores_cached(
+        scored, group_col_arg, keep_composite_0_100=(not is_sgg))
 
 
 # ── 현재 시각화 항목을 공통 형식(sub)으로 구성
@@ -340,6 +355,8 @@ if metric_type == "세부지표" and not is_sgg and "출처" in sub.columns:
         cap += f" · 진단: {_diag}"
 elif metric_type != "세부지표":
     cap += " · 세부지표 결합점수"
+    if not is_sgg:
+        cap += " · 상위집계 부문·종합은 재표준화하지 않은 0~100 합산점수"
 st.caption(cap)
 
 if sub.empty:
@@ -508,9 +525,6 @@ if not is_sgg:
     st.divider()
     st.subheader(f"{level} 시군구 분포")
 
-    # 시군구 분포는 현재 시각화 항목에 대응하는 시군구 수준 값을 사용한다.
-    # 세부지표의 T/Min-Max는 전국 시군구 기준이며, 부문·종합 점수도
-    # 전국 시군구 점수를 결합한 뒤 부문/종합 T를 재표준화해서 사용한다.
     if metric_type == "세부지표":
         if mode == "T점수":
             sgg_view = core.add_tscore(raw)
@@ -520,161 +534,163 @@ if not is_sgg:
             sgg_view = raw.copy()
         hv = sgg_view[sgg_view["지표명"] == ind].dropna(subset=[mode]).copy()
     else:
-        # 전국 시군구 기준 점수도 캐시하여 시각화 항목 변경 시 재계산하지 않는다.
+        # 히트맵은 '상위집계 점수'가 아니라 전국 시군구의 부문·종합 분포를 보여준다.
         sgg_scored, _ = build_scored_base(raw, denom, sido_actual, None, "전국")
-        sgg_field, sgg_total = build_scores_cached(sgg_scored, None)
+        sgg_field, sgg_total = build_scores_cached(sgg_scored, None, False)
         hv = (sgg_field[sgg_field["항목"] == cat].copy()
               if metric_type == "부문점수" else sgg_total.copy())
         hv["Min-Max"] = hv["Min-Max점수"]
         hv["백분위"] = hv["백분위_T"] if mode == "T점수" else hv["백분위_MinMax"]
-        # 상위단위 분류(시도/도시규모/권역)를 시군구 지역키로 붙인다.
         class_meta = raw.drop_duplicates("지역")[["지역", level_col]]
         hv = hv.merge(class_meta, on="지역", how="left").dropna(subset=[mode])
 
-    hv = hv[hv[level_col].notna()]
+    hv = hv[hv[level_col].notna()].copy()
     hv["클래스"] = hv[level_col].astype(str)
+    valid_n = int(hv["지역"].nunique()) if "지역" in hv.columns else len(hv)
 
-    hc1, hc2, hc3 = st.columns(3)
-    if mode == "T점수":                                   # T점수는 정수 폭으로 급간 설정
-        bw = hc1.select_slider("급간 폭 (T점수)", options=[1, 2, 5, 10], value=2)
+    if hv.empty or hv[mode].dropna().empty:
+        st.info("히트맵에 표시할 유효한 시군구 값이 없습니다. (결측 또는 최소 유효지표 기준 미달)")
     else:
-        nbin = hc1.select_slider("급간 수", options=[10, 15, 20, 30, 40], value=20)
-    norm = hc2.radio("색상 기준", ["시군구 수", "클래스 내 비율(%)"], horizontal=True)
-    if mode == "T점수":
-        hcut = float(hc3.select_slider("상한 (T점수)",
-                                       options=[55, 60, 65, 70, 75, 80], value=70))
-    else:
-        hp = hc3.select_slider("상한 (상위 백분위)",
-                               options=[80, 85, 90, 95, 99, 100], value=95)
-        hcut = float(hv[mode].quantile(hp / 100))
+        hc1, hc2, hc3 = st.columns(3)
+        if mode == "T점수":
+            bw = hc1.select_slider("급간 폭 (T점수)", options=[1, 2, 5, 10], value=2)
+        else:
+            nbin = hc1.select_slider("급간 수", options=[10, 15, 20, 30, 40], value=20)
+        norm = hc2.radio("색상 기준", ["시군구 수", "클래스 내 비율(%)"], horizontal=True)
+        if mode == "T점수":
+            hcut = float(hc3.select_slider("상한 (T점수)",
+                                           options=[55, 60, 65, 70, 75, 80], value=70))
+        else:
+            hp = hc3.select_slider("상한 (상위 백분위)",
+                                   options=[80, 85, 90, 95, 99, 100], value=95)
+            hcut = float(hv[mode].quantile(hp / 100))
 
-    hx = hv[mode].clip(upper=hcut)
-    if mode == "T점수":                                   # 상한에서 거꾸로 정수 폭만큼 → 경계가 모두 정수
-        h_hi = hcut
-        nbin = max(1, int(np.ceil((h_hi - float(hx.min())) / bw)))
-        h_lo = h_hi - nbin * bw
-        edges = h_lo + bw * np.arange(nbin + 1, dtype=float)
-    else:
-        h_lo = float(hx.min())
-        h_hi = hcut if hcut > h_lo else h_lo + 1
-        edges = np.linspace(h_lo, h_hi, nbin + 1)
-    hv["급간"] = pd.cut(hx, edges, include_lowest=True, labels=False)
-    n_clip = int((hv[mode] > hcut).sum())
+        hx = hv[mode].clip(upper=hcut)
+        if mode == "T점수":
+            h_hi = hcut
+            hmin = float(hx.min())
+            nbin = max(1, int(np.ceil((h_hi - hmin) / bw)))
+            h_lo = h_hi - nbin * bw
+            edges = h_lo + bw * np.arange(nbin + 1, dtype=float)
+        else:
+            h_lo = float(hx.min())
+            h_hi = hcut if hcut > h_lo else h_lo + 1
+            edges = np.linspace(h_lo, h_hi, nbin + 1)
 
-    rows = [str(r) for r in d["지역"]]                    # 막대그래프와 같은 순서
-    missing_rows = [x for x in units if x in set(hv["클래스"]) and x not in set(rows)]
-    rows = missing_rows + rows
+        hv["급간"] = pd.cut(hx, edges, include_lowest=True, labels=False)
+        n_clip = int((hv[mode] > hcut).sum())
 
-    ct = (hv.groupby(["클래스", "급간"]).size().unstack(fill_value=0)
-          .reindex(index=rows, columns=range(nbin), fill_value=0))
-    cnt = ct.values.astype(float)
-    tot = cnt.sum(axis=1, keepdims=True)
-    pct_m = np.divide(cnt * 100, tot, out=np.zeros_like(cnt), where=tot > 0)
-    zval = cnt if norm == "시군구 수" else pct_m
+        # 막대그래프와 같은 입력 순서를 유지하되, 실제 유효 클래스만 사용한다.
+        rows = [str(r) for r in units if str(r) in set(hv["클래스"])]
+        ct = (hv.groupby(["클래스", "급간"]).size().unstack(fill_value=0)
+              .reindex(index=rows, columns=range(nbin), fill_value=0))
+        cnt = ct.values.astype(float)
+        tot = cnt.sum(axis=1, keepdims=True)
+        pct_m = np.divide(cnt * 100, tot, out=np.zeros_like(cnt), where=tot > 0)
+        zval = cnt if norm == "시군구 수" else pct_m
 
-    fe = (lambda v: f"{v:.0f}") if mode == "T점수" else (lambda v: f"{v:,.4g}")
-    hover = [[f"<b>{rows[i]}</b><br>{fe(edges[j])} ~ {fe(edges[j + 1])}"
-              + (" (상한 초과 포함)" if j == nbin - 1 and n_clip else "")
-              + f"<br>{int(cnt[i, j])}곳 · 클래스 내 {pct_m[i, j]:.0f}%"
-              for j in range(nbin)] for i in range(len(rows))]
-    cell = [[("" if cnt[i, j] == 0 else
-              (f"{int(cnt[i, j])}" if norm == "시군구 수" else f"{pct_m[i, j]:.0f}"))
-             for j in range(nbin)] for i in range(len(rows))]
+        fe = (lambda v: f"{v:.0f}") if mode == "T점수" else (lambda v: f"{v:,.4g}")
+        hover = [[f"<b>{rows[i]}</b><br>{fe(edges[j])} ~ {fe(edges[j + 1])}"
+                  + (" (상한 초과 포함)" if j == nbin - 1 and n_clip else "")
+                  + f"<br>{int(cnt[i, j])}곳 · 클래스 내 {pct_m[i, j]:.0f}%"
+                  for j in range(nbin)] for i in range(len(rows))]
+        cell = [[("" if cnt[i, j] == 0 else
+                  (f"{int(cnt[i, j])}" if norm == "시군구 수" else f"{pct_m[i, j]:.0f}"))
+                 for j in range(nbin)] for i in range(len(rows))]
 
-    hfig = go.Figure(go.Heatmap(
-        z=zval, x=(edges[:-1] + edges[1:]) / 2, y=rows,
-        colorscale="Greys", zmin=0,
-        text=cell, texttemplate="%{text}", textfont=dict(size=9),
-        hovertext=hover, hovertemplate="%{hovertext}<extra></extra>",
-        colorbar=dict(title=dict(text=norm, side="right"), thickness=10)))
+        hfig = go.Figure(go.Heatmap(
+            z=zval, x=(edges[:-1] + edges[1:]) / 2, y=rows,
+            colorscale="Greys", zmin=0,
+            text=cell, texttemplate="%{text}", textfont=dict(size=9),
+            hovertext=hover, hovertemplate="%{hovertext}<extra></extra>",
+            colorbar=dict(title=dict(text=norm, side="right"), thickness=10)))
 
-    if mode == "T점수" and h_lo <= 50 <= h_hi:
-        hfig.add_vline(x=50, line_dash="dash", line_color="gray", line_width=1,
-                       annotation_text="평균 50", annotation_position="top")
-    if target and str(target) in rows:
-        k = rows.index(str(target))
-        hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=k - 0.5, y1=k + 0.5,
-                       line=dict(color="#D62728", width=2))
+        if mode == "T점수" and h_lo <= 50 <= h_hi:
+            hfig.add_vline(x=50, line_dash="dash", line_color="gray", line_width=1,
+                           annotation_text="평균 50", annotation_position="top")
+        if target and str(target) in rows:
+            k = rows.index(str(target))
+            hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=k - 0.5, y1=k + 0.5,
+                           line=dict(color="#D62728", width=2))
 
-    GRID = dict(color="#d0d0d0", width=0.6)
-    nr = len(rows)
-    for e in edges[1:-1]:                                  # 세로 격자선 (안쪽만)
-        hfig.add_shape(type="line", x0=e, x1=e, y0=-0.5, y1=nr - 0.5, line=GRID, layer="above")
-    for k in range(nr - 1):                                # 가로 격자선 (안쪽만)
-        hfig.add_shape(type="line", x0=edges[0], x1=edges[-1], y0=k + 0.5, y1=k + 0.5,
+        GRID = dict(color="#d0d0d0", width=0.6)
+        nr = len(rows)
+        for e in edges[1:-1]:
+            hfig.add_shape(type="line", x0=e, x1=e, y0=-0.5, y1=nr - 0.5, line=GRID, layer="above")
+        for k in range(nr - 1):
+            hfig.add_shape(type="line", x0=edges[0], x1=edges[-1], y0=k + 0.5, y1=k + 0.5,
+                           line=GRID, layer="above")
+        hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=-0.5, y1=nr - 0.5,
                        line=GRID, layer="above")
-    hfig.add_shape(type="rect", x0=edges[0], x1=edges[-1], y0=-0.5, y1=nr - 0.5,
-                   line=GRID, layer="above")               # 외곽선도 같은 굵기
 
-    ROW_H = 18                                             # 행 1개 높이(px)
-    hfig.update_layout(height=ROW_H * nr + 90,
-                       xaxis=dict(title=f"{mode} (시군구 값)", showgrid=False, zeroline=False,
-                                  showline=False, range=[edges[0], edges[-1]]),
-                       yaxis=dict(type="category", showgrid=False, showline=False,
-                                  # rows는 입력 데이터 순서(시도: 서울→…→제주).
-                                  # Plotly Heatmap은 첫 행을 아래쪽에 두므로 축을 뒤집어
-                                  # 입력 순서의 첫 항목이 화면 맨 위에 오도록 한다.
-                                  range=[nr - 0.5, -0.5]),
-                       plot_bgcolor="rgba(0,0,0,0)",
-                       font=dict(size=11),
-                       margin=dict(l=10, t=24, b=36))
-    st.plotly_chart(hfig, use_container_width=True)
-    st.caption("칸의 색 = 해당 급간에 속한 시군구 수. "
-               + ("T점수는 전국 229개 시군구 기준으로 표준화한 값입니다. " if mode == "T점수" else "")
-               + (f"마지막 급간에는 상한 초과 {n_clip}곳이 포함됩니다. " if n_clip else "")
-               + "클래스마다 시군구 수가 달라 비교가 어려우면 '클래스 내 비율'로 바꿔 보세요.")
+        ROW_H = 18
+        hfig.update_layout(height=ROW_H * nr + 90,
+                           xaxis=dict(title=f"{mode} (시군구 값)", showgrid=False, zeroline=False,
+                                      showline=False, range=[edges[0], edges[-1]]),
+                           yaxis=dict(type="category", showgrid=False, showline=False,
+                                      range=[nr - 0.5, -0.5]),
+                           plot_bgcolor="rgba(0,0,0,0)",
+                           font=dict(size=11),
+                           margin=dict(l=10, t=24, b=36))
+        st.plotly_chart(hfig, use_container_width=True)
+        st.caption(
+            f"유효 시군구 {valid_n}개 기준. 칸의 색 = 해당 급간에 속한 시군구 수. "
+            + (f"T점수는 유효 {valid_n}개 시군구를 기준으로 표준화한 값입니다. " if mode == "T점수" else "")
+            + (f"마지막 급간에는 상한 초과 {n_clip}곳이 포함됩니다. " if n_clip else "")
+            + "클래스마다 시군구 수가 달라 비교가 어려우면 '클래스 내 비율'로 바꿔 보세요.")
 
 # ── 지역 진단
 if target and not mine.empty:
     st.divider()
     st.subheader(f"{target} 진단")
-    # 분야점수는 위에서 선택한 방식과 동일한 산식으로 계산한다.
-    # 원자료 보기에서는 기존 T점수 기반 진단을 그대로 유지한다.
     field_scores, total_scores = build_scores_for_current_group(base)
     mine_all = base[base["지역"] == target].dropna(subset=["T점수"])
 
-    if cat == "전체" and mode in ["T점수", "Min-Max"]:
+    if cat == "전체":
+        # 원자료 모드에서도 부문 진단은 공식 부문점수를 사용한다.
+        # 따라서 같은 '부문 T점수'가 화면 위치에 따라 다른 산식으로 계산되지 않는다.
         plot = field_scores[field_scores["지역"] == target].copy()
-        score_col = "T점수" if mode == "T점수" else "Min-Max점수"
-        pct_col = "백분위_T" if mode == "T점수" else "백분위_MinMax"
-        plot = plot[["항목", score_col, pct_col, "지표수"]].rename(
-            columns={score_col: "점수", pct_col: "백분위"})
-        axis_title = mode
+        use_minmax = (mode == "Min-Max")
+        score_col = "Min-Max점수" if use_minmax else "T점수"
+        pct_col = "백분위_MinMax" if use_minmax else "백분위_T"
+        keep_cols = [c for c in ["항목", score_col, pct_col, "지표수"] if c in plot.columns]
+        plot = plot[keep_cols].rename(columns={score_col: "점수", pct_col: "백분위"})
+        axis_title = "Min-Max" if use_minmax else "T점수"
     else:
-        if cat == "전체":
-            plot = (mine_all.groupby("대분류")
-                    .agg(Z=("Z점수", "mean"), 백분위=("백분위", "mean"),
-                         지표수=("지표명", "count"))
-                    .reset_index().rename(columns={"대분류": "항목"}))
-            plot["점수"] = 50 + 10 * plot["Z"]
-        else:
-            score_col = "Min-Max" if mode == "Min-Max" else "T점수"
-            plot = (mine_all[mine_all["대분류"] == cat][["지표명", score_col, "백분위"]]
-                    .rename(columns={"지표명": "항목", score_col: "점수"}))
-            plot["지표수"] = 1
+        score_col = "Min-Max" if mode == "Min-Max" else "T점수"
+        cols = [c for c in ["지표명", score_col, "백분위"] if c in mine_all.columns]
+        plot = mine_all[mine_all["대분류"] == cat][cols].rename(
+            columns={"지표명": "항목", score_col: "점수"})
+        plot["지표수"] = 1
         axis_title = "T점수" if mode == "원자료" else mode
 
     order = st.radio("정렬", ["높은 값 순", "낮은 값 순"], horizontal=True)
-    plot = plot.sort_values("점수", ascending=(order == "낮은 값 순"))
+    plot = plot.dropna(subset=["점수"]).sort_values(
+        "점수", ascending=(order == "낮은 값 순"))
 
-    fig2 = go.Figure(go.Bar(
-        x=plot["점수"], y=plot["항목"], orientation="h",
-        marker_color=np.where(plot["점수"] >= 50, "#1F4E9C", "#9BB8DE"),
-        text=[f"{v:.0f}" for v in plot["점수"]], textposition="outside"))
-    fig2.add_vline(x=50, line_dash="dash", line_color="gray")
-    b_lo, b_hi = plot["점수"].min(), plot["점수"].max()
-    pad = max(3, (b_hi - b_lo) * 0.25)
-    fig2.update_layout(height=max(300, 45 * len(plot)), xaxis_title=axis_title,
-                       xaxis_range=[b_lo - pad, b_hi + pad],
-                       margin=dict(l=10, t=30, b=40))
-    st.plotly_chart(fig2, use_container_width=True)
+    if plot.empty:
+        st.info("선택 지역의 해당 진단 점수를 산출할 수 없습니다. (결측 또는 최소 유효지표 기준 미달)")
+    else:
+        fig2 = go.Figure(go.Bar(
+            x=plot["점수"], y=plot["항목"], orientation="h",
+            marker_color=np.where(plot["점수"] >= 50, "#1F4E9C", "#9BB8DE"),
+            text=[f"{v:.0f}" for v in plot["점수"]], textposition="outside"))
+        fig2.add_vline(x=50, line_dash="dash", line_color="gray")
+        b_lo, b_hi = float(plot["점수"].min()), float(plot["점수"].max())
+        span = b_hi - b_lo
+        pad = max(3.0, span * 0.25 if np.isfinite(span) else 3.0)
+        fig2.update_layout(height=max(300, 45 * len(plot)), xaxis_title=axis_title,
+                           xaxis_range=[b_lo - pad, b_hi + pad],
+                           margin=dict(l=10, t=30, b=40))
+        st.plotly_chart(fig2, use_container_width=True)
 
-    pos = f"{group if is_sgg else level} 내 위치"
-    plot[pos] = plot["백분위"].apply(
-        lambda p: "중간" if 40 <= p <= 60 else
-        (f"상위 {100-p:.0f}%" if p > 60 else f"하위 {p:.0f}%"))
-    st.dataframe(plot[["항목", "점수", pos, "지표수"]].style.format({"점수": "{:.1f}"}),
-                 use_container_width=True, hide_index=True)
+        pos = f"{group if is_sgg else level} 내 위치"
+        plot[pos] = plot["백분위"].apply(
+            lambda p: "산출 불가" if pd.isna(p) else
+            ("중간" if 40 <= p <= 60 else
+             (f"상위 {100-p:.0f}%" if p > 60 else f"하위 {p:.0f}%")))
+        st.dataframe(plot[["항목", "점수", pos, "지표수"]].style.format({"점수": "{:.1f}"}),
+                     use_container_width=True, hide_index=True)
 else:
     st.info("지역을 선택하면 상세 진단이 표시됩니다.")
 
