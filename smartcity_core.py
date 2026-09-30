@@ -114,18 +114,37 @@ def load_values(defs, raw):
 
 
 def load_denominators(raw):
-    """분모 시트 → 지역 × 분모변수 wide 테이블. 실패하면 None"""
-    try:
-        df = pd.DataFrame(raw[1:], columns=[c.strip() for c in raw[0]])
-        key = df.columns[0]                      # 첫 열이 '시도시군구'
-        df = df[df[key].astype(str).str.strip() != ""].copy()
-        out = pd.DataFrame({"지역": df[key].str.strip()})
-        for c in df.columns[1:]:
-            if c.strip():
-                out[c.strip()] = to_num(df[c])
-        return out.loc[:, ~out.columns.duplicated()]
-    except Exception:
-        return None
+    """분모 시트 → 지역 × 분모변수 wide 테이블.
+
+    열 이름 중복 등으로 특정 열 선택이 DataFrame이 되는 문제를 피하기 위해
+    헤더명이 아니라 열 위치 기준으로 읽는다. 오류는 여기서 숨기지 않고
+    호출부에서 실제 예외 메시지를 진단정보로 보존한다.
+    """
+    if not raw or not raw[0]:
+        raise ValueError("분모 시트가 비어 있음")
+
+    headers = [str(c).strip() for c in raw[0]]
+    body = pd.DataFrame(raw[1:])
+    if body.empty or body.shape[1] == 0:
+        raise ValueError("분모 시트에 데이터 행이 없음")
+
+    # 첫 열은 지역키. 열 이름이 중복되어도 위치 기준으로 안전하게 처리한다.
+    region = body.iloc[:, 0].astype(str).str.strip()
+    out = pd.DataFrame({"지역": region})
+
+    seen = {"지역"}
+    ncols = min(len(headers), body.shape[1])
+    for j in range(1, ncols):
+        name = headers[j]
+        if not name or name in seen:
+            continue
+        out[name] = to_num(body.iloc[:, j])
+        seen.add(name)
+
+    out = out[out["지역"] != ""].reset_index(drop=True)
+    if out.empty:
+        raise ValueError("분모 시트의 지역키가 모두 비어 있음")
+    return out
 
 
 def add_groups(long):
@@ -189,7 +208,12 @@ def aggregate(long, level_col, denom=None, sido_actual=None):
             dname = str(meta["집계_분모"]).strip()
             w = None
 
-            if denom is None:
+            denom_error = (denom.attrs.get("load_error", "")
+                           if isinstance(denom, pd.DataFrame) else "")
+            if denom_error:
+                val = v.mean()
+                how = f"단순평균(분모 시트 오류: {denom_error})"
+            elif denom is None:
                 val = v.mean()
                 how = "단순평균(분모 시트 읽기 실패)"
             elif not dname:
@@ -361,7 +385,10 @@ def build_base(sheet_id):
 
     try:
         denom = load_denominators(fetch_grid(sheet_id, DENOM_GID))
-    except Exception:
-        denom = None
+    except Exception as e:
+        # 기존 반환 구조(3개)는 유지하되, 빈 DataFrame의 attrs에 실제 오류를 보존한다.
+        # app/aggregate에서 이를 그대로 진단문구로 표시할 수 있다.
+        denom = pd.DataFrame()
+        denom.attrs["load_error"] = f"{type(e).__name__}: {e}"
 
     return long.reset_index(drop=True), denom, load_sido_actual(sheet_id)
