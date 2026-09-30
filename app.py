@@ -487,16 +487,23 @@ else:
 st.divider()
 with st.expander("세부지표 전체 보기", expanded=False):
     view = display_base if cat == "전체" else display_base[display_base["대분류"] == cat]
+    view = view.copy()
+    if "인구규모군" in view.columns:
+        view["도시규모유형"] = view["인구규모군"]
+
     if target:
-        c = ["대분류", "지표명", "원자료", "Min-Max", "T점수", "백분위"]
+        c = ["시도명", "도시규모유형", "대분류", "지표명", "원자료", "Min-Max", "T점수", "백분위"]
         if not is_sgg:
             c += ["집계방식", "구성지역수", "출처"]
+        c = [x for x in c if x in view.columns]
         tbl = view[view["지역"] == target][c].sort_values(["대분류", "지표명"])
         st.caption(f"{target} · {len(tbl)}개 지표")
     else:
-        tbl = (view.pivot_table(index="지역", columns="지표명", values=mode)
+        index_cols = [x for x in ["시도명", "도시규모유형", "지역"] if x in view.columns]
+        tbl = (view.pivot_table(index=index_cols, columns="지표명", values=mode)
                .round(1).reset_index())
-        st.caption(f"{len(tbl)}개 단위 × {len(tbl.columns)-1}개 지표 · 값 기준 {mode}")
+        n_indicator_cols = len(tbl.columns) - len(index_cols)
+        st.caption(f"{len(tbl)}개 단위 × {n_indicator_cols}개 지표 · 값 기준 {mode}")
     st.dataframe(tbl, use_container_width=True, hide_index=True, height=520)
     st.download_button("CSV 내려받기",
                        tbl.to_csv(index=False).encode("utf-8-sig"),
@@ -516,18 +523,28 @@ if is_sgg:
                 show_regions = set(display_base["지역"].dropna().unique())
                 score_tbl = score_tbl[score_tbl["지역"].isin(show_regions)]
             st.caption(f"{group} 비교집단 · 시각화 대상 {visual_target} · 지표 가중치 적용 (현재 기본값 1)")
-        score_tbl = score_tbl[["지역", "항목", "Min-Max점수", "T점수", "지표수", "가중치합"]]
+
+        # 지역 메타정보 추가: 시도명, 도시규모유형
+        region_meta_cols = [c for c in ["지역", "시도명", "인구규모군"] if c in base.columns]
+        region_meta = base.drop_duplicates("지역")[region_meta_cols].copy()
+        if "인구규모군" in region_meta.columns:
+            region_meta = region_meta.rename(columns={"인구규모군": "도시규모유형"})
+        score_tbl = score_tbl.merge(region_meta, on="지역", how="left")
+        score_tbl = score_tbl[[c for c in ["시도명", "도시규모유형", "지역", "항목",
+                                                  "Min-Max점수", "T점수", "지표수", "가중치합"]
+                                     if c in score_tbl.columns]]
 
         # wide 형식: 지역을 행으로, 분야 및 종합을 열로 표시
         item_order = list(field_scores["항목"].dropna().drop_duplicates()) + ["종합"]
-        wide = score_tbl.pivot(index="지역", columns="항목", values=["Min-Max점수", "T점수"])
+        index_cols = [c for c in ["시도명", "도시규모유형", "지역"] if c in score_tbl.columns]
+        wide = score_tbl.pivot(index=index_cols, columns="항목", values=["Min-Max점수", "T점수"])
         wide = wide.reindex(columns=pd.MultiIndex.from_product(
             [["Min-Max점수", "T점수"], [c for c in item_order if c in score_tbl["항목"].values]]
         ))
         wide.columns = [f"{score_type} | {item}" for score_type, item in wide.columns]
         wide = wide.reset_index()
 
-        fmt = {c: "{:.1f}" for c in wide.columns if c != "지역"}
+        fmt = {c: "{:.1f}" for c in wide.columns if c not in index_cols}
         st.dataframe(
             wide.style.format(fmt),
             use_container_width=True, hide_index=True, height=520)
