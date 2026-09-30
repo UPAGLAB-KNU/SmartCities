@@ -72,8 +72,8 @@ level = st.selectbox("집계 수준",
 level_col = core.LEVELS[level]
 is_sgg = level_col is None
 
-# ── 3행: 지역·비교집단
-c4, c5, c6 = st.columns([2, 2, 2])
+# ── 3행: 지역·비교집단·시각화 대상
+c4, c5, c6, c7 = st.columns([2, 2, 2, 2])
 if is_sgg:
     sido = c4.selectbox("시도", ["전체"] + sorted(raw["시도명"].unique()))
     sgg_opts = ["전체"] + (sorted(raw[raw["시도명"] == sido]["시군구명"].unique())
@@ -84,6 +84,21 @@ if is_sgg:
     group = c6.selectbox("비교집단",
                          ["전국", "동일 시도", "특광역시-도", "시-군",
                           "인구규모 유사지역"])
+
+    # 비교집단은 점수 산정 기준, 시각화 대상은 화면에 표시할 지역 필터
+    if group == "동일 시도":
+        visual_options = ["전체"] + sorted(raw["시도명"].dropna().astype(str).unique())
+    elif group == "특광역시-도":
+        visual_options = ["전체", "특광역시", "도"]
+    elif group == "시-군":
+        visual_options = ["전체", "시·구", "군"]
+    elif group == "인구규모 유사지역":
+        bins = [str(x) for x in raw["인구규모군"].dropna().unique()]
+        preferred = [x for x in getattr(core, "POP_LABELS", []) if x in bins]
+        visual_options = ["전체"] + preferred + [x for x in bins if x not in preferred]
+    else:
+        visual_options = ["전체"]
+    visual_target = c7.selectbox("시각화 대상", visual_options)
 else:
     units = [u for u in raw[level_col].dropna().unique()]
     target = c4.selectbox(level.replace("별", ""), ["전체"] + list(units))
@@ -91,7 +106,9 @@ else:
     label = target
     c5.empty()
     group = "전체"
+    visual_target = "전체"
     c6.caption(f"{level} 집계 · 비교집단은 전체 {len(units)}개 단위")
+    c7.empty()
 
 # ── 집계 및 표준화
 agg = core.aggregate(raw, level_col, denom, sido_actual)
@@ -123,6 +140,16 @@ else:
     subset = agg
     score_group_col = None
     base = core.add_minmax(core.add_tscore(subset))
+
+# 점수는 전체 비교집단 기준으로 계산한 뒤, 시각화 대상은 표시 단계에서만 필터링
+display_base = base
+if is_sgg and visual_target != "전체":
+    if group == "동일 시도":
+        display_base = base[base["시도명"].astype(str) == visual_target]
+    elif group in ["특광역시-도", "시-군"]:
+        display_base = base[base["_비교집단"].astype(str) == visual_target]
+    elif group == "인구규모 유사지역":
+        display_base = base[base["인구규모군"].astype(str) == visual_target]
 
 
 def build_scores_for_current_group(scored):
@@ -156,9 +183,9 @@ def build_scores_for_current_group(scored):
     return field_scores, total_scores
 
 
-sub = base[base["지표명"] == ind].dropna(subset=[mode])
+sub = display_base[display_base["지표명"] == ind].dropna(subset=[mode])
 
-cap = f"{level} · 비교집단 {group} 기준 · 유효 {len(sub)}개 / 전체 {base['지역'].nunique()}개"
+cap = f"{level} · 비교집단 {group} 기준 · 시각화 대상 {visual_target} · 유효 {len(sub)}개 / 전체 {base['지역'].nunique()}개"
 if not is_sgg and "출처" in sub.columns:
     n_real = int((sub["출처"] == "실측").sum())
     if n_real:
@@ -459,7 +486,7 @@ else:
 # ── 세부지표 전체 보기
 st.divider()
 with st.expander("세부지표 전체 보기", expanded=False):
-    view = base if cat == "전체" else base[base["대분류"] == cat]
+    view = display_base if cat == "전체" else display_base[display_base["대분류"] == cat]
     if target:
         c = ["대분류", "지표명", "원자료", "Min-Max", "T점수", "백분위"]
         if not is_sgg:
@@ -485,7 +512,10 @@ if is_sgg:
             score_tbl = score_tbl[score_tbl["지역"] == target]
             st.caption(f"{target} · 지표 가중치 적용 (현재 기본값 1)")
         else:
-            st.caption(f"{group} 비교집단 · 지표 가중치 적용 (현재 기본값 1)")
+            if visual_target != "전체":
+                show_regions = set(display_base["지역"].dropna().unique())
+                score_tbl = score_tbl[score_tbl["지역"].isin(show_regions)]
+            st.caption(f"{group} 비교집단 · 시각화 대상 {visual_target} · 지표 가중치 적용 (현재 기본값 1)")
         score_tbl = score_tbl[["지역", "항목", "Min-Max점수", "T점수", "지표수", "가중치합"]]
 
         # wide 형식: 지역을 행으로, 분야 및 종합을 열로 표시
