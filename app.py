@@ -96,47 +96,69 @@ else:
 # ── 집계 및 표준화
 agg = core.aggregate(raw, level_col, denom, sido_actual)
 
+# 시군구별에서는 특정 지역을 골라내는 필터가 아니라, 각 시군구가 속한
+# 비교집단 안에서 점수를 계산한 뒤 전국 모든 시군구를 그대로 표시한다.
 if is_sgg:
-    if group == "전국":
-        subset = agg
-    elif group == "동일 시도":
-        subset = agg[agg["시도명"] == sido] if sido != "전체" else agg
+    subset = agg.copy()
+    score_group_col = None
+
+    if group == "동일 시도":
+        score_group_col = "시도명"
     elif group == "특광역시-도":
-        if target:
-            my_sido = agg.loc[agg["지역"] == target, "시도명"].iloc[0]
-            is_metro = bool(pd.Series([my_sido]).str.contains(
-                "특별시|광역시|특별자치시", regex=True, na=False).iloc[0])
-            metro_mask = agg["시도명"].str.contains(
-                "특별시|광역시|특별자치시", regex=True, na=False)
-            subset = agg[metro_mask] if is_metro else agg[~metro_mask]
-        else:
-            subset = agg
+        score_group_col = "_비교집단"
+        metro_mask = subset["시도명"].astype(str).str.contains(
+            "특별시|광역시|특별자치시", regex=True, na=False)
+        subset[score_group_col] = np.where(metro_mask, "특광역시", "도")
     elif group == "시-군":
-        if target:
-            my_sgg = agg.loc[agg["지역"] == target, "시군구명"].iloc[0]
-            is_gun = str(my_sgg).endswith("군")
-            gun_mask = agg["시군구명"].astype(str).str.endswith("군", na=False)
-            subset = agg[gun_mask] if is_gun else agg[~gun_mask]
-        else:
-            subset = agg
+        score_group_col = "_비교집단"
+        gun_mask = subset["시군구명"].astype(str).str.endswith("군", na=False)
+        subset[score_group_col] = np.where(gun_mask, "군", "시·구")
     elif group == "인구규모 유사지역":
-        if target:
-            myg = agg.loc[agg["지역"] == target, "인구규모군"].iloc[0]
-            subset = agg[agg["인구규모군"] == myg]
-        else:
-            subset = agg
-    else:
-        subset = agg
-    if target and target not in subset["지역"].values:
-        st.warning(f"{target}는 '{group}' 비교집단에 없어 전국 기준으로 표시합니다.")
-        subset, group = agg, "전국"
+        score_group_col = "인구규모군"
+
+    base = core.add_minmax(
+        core.add_tscore(subset, group_col=score_group_col),
+        group_col=score_group_col)
 else:
     subset = agg
+    score_group_col = None
+    base = core.add_minmax(core.add_tscore(subset))
 
-base = core.add_minmax(core.add_tscore(subset))
+
+def build_scores_for_current_group(scored):
+    """분야·종합 T점수도 현재 비교집단 안에서 재표준화한다."""
+    field_scores, total_scores = core.build_field_total_scores(scored)
+    if not is_sgg or score_group_col is None:
+        return field_scores, total_scores
+
+    region_group = (scored.drop_duplicates("지역")[["지역", score_group_col]]
+                    .dropna(subset=[score_group_col]))
+
+    field_scores = field_scores.merge(region_group, on="지역", how="left")
+    total_scores = total_scores.merge(region_group, on="지역", how="left")
+
+    def _t_within_group(df, item_col=None):
+        keys = [score_group_col] + ([item_col] if item_col else [])
+        g = df.groupby(keys, observed=True)["T원점수"]
+        mean = g.transform("mean")
+        sd = g.transform("std")
+        z = (df["T원점수"] - mean) / sd.replace(0, np.nan)
+        df["T점수"] = 50 + 10 * z
+        # 비교집단 내 분산이 0인 경우 값이 있는 지역은 50점
+        zero = sd.eq(0) & df["T원점수"].notna()
+        df.loc[zero, "T점수"] = 50.0
+        df["백분위_T"] = df.groupby(keys, observed=True)["T점수"].rank(pct=True) * 100
+        df["백분위_MinMax"] = df.groupby(keys, observed=True)["Min-Max점수"].rank(pct=True) * 100
+        return df
+
+    field_scores = _t_within_group(field_scores, "항목")
+    total_scores = _t_within_group(total_scores)
+    return field_scores, total_scores
+
+
 sub = base[base["지표명"] == ind].dropna(subset=[mode])
 
-cap = f"{level} · 비교집단 {group} · 유효 {len(sub)}개 / 전체 {base['지역'].nunique()}개"
+cap = f"{level} · 비교집단 {group} 기준 · 유효 {len(sub)}개 / 전체 {base['지역'].nunique()}개"
 if not is_sgg and "출처" in sub.columns:
     n_real = int((sub["출처"] == "실측").sum())
     if n_real:
@@ -386,7 +408,7 @@ if target and not mine.empty:
     st.subheader(f"{target} 진단")
     # 분야점수는 위에서 선택한 방식과 동일한 산식으로 계산한다.
     # 원자료 보기에서는 기존 T점수 기반 진단을 그대로 유지한다.
-    field_scores, total_scores = core.build_field_total_scores(base)
+    field_scores, total_scores = build_scores_for_current_group(base)
     mine_all = base[base["지역"] == target].dropna(subset=["T점수"])
 
     if cat == "전체" and mode in ["T점수", "Min-Max"]:
@@ -457,7 +479,7 @@ with st.expander("세부지표 전체 보기", expanded=False):
 # ── 분야별·종합 점수 보기 (시군구 수준)
 if is_sgg:
     with st.expander("분야별·종합 점수 보기", expanded=False):
-        field_scores, total_scores = core.build_field_total_scores(base)
+        field_scores, total_scores = build_scores_for_current_group(base)
         score_tbl = pd.concat([field_scores, total_scores], ignore_index=True)
         if target:
             score_tbl = score_tbl[score_tbl["지역"] == target]
