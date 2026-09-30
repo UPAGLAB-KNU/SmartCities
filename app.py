@@ -509,7 +509,10 @@ if not is_sgg:
                        xaxis=dict(title=f"{mode} (시군구 값)", showgrid=False, zeroline=False,
                                   showline=False, range=[edges[0], edges[-1]]),
                        yaxis=dict(type="category", showgrid=False, showline=False,
-                                  range=[-0.5, nr - 0.5]),
+                                  # rows는 입력 데이터 순서(시도: 서울→…→제주).
+                                  # Plotly Heatmap은 첫 행을 아래쪽에 두므로 축을 뒤집어
+                                  # 입력 순서의 첫 항목이 화면 맨 위에 오도록 한다.
+                                  range=[nr - 0.5, -0.5]),
                        plot_bgcolor="rgba(0,0,0,0)",
                        font=dict(size=11),
                        margin=dict(l=10, t=24, b=36))
