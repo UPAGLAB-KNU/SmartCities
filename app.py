@@ -82,7 +82,7 @@ if is_sgg:
     target = f"{sido} {sgg}" if (sido != "전체" and sgg != "전체") else None
     label = sgg
     group = c6.selectbox("비교집단",
-                         ["전국", "동일 시도", "특별·광역시", "시 지역", "군 지역",
+                         ["전국", "동일 시도", "특광역시-도", "시-군",
                           "인구규모 유사지역"])
 else:
     units = [u for u in raw[level_col].dropna().unique()]
@@ -101,6 +101,24 @@ if is_sgg:
         subset = agg
     elif group == "동일 시도":
         subset = agg[agg["시도명"] == sido] if sido != "전체" else agg
+    elif group == "특광역시-도":
+        if target:
+            my_sido = agg.loc[agg["지역"] == target, "시도명"].iloc[0]
+            is_metro = bool(pd.Series([my_sido]).str.contains(
+                "특별시|광역시|특별자치시", regex=True, na=False).iloc[0])
+            metro_mask = agg["시도명"].str.contains(
+                "특별시|광역시|특별자치시", regex=True, na=False)
+            subset = agg[metro_mask] if is_metro else agg[~metro_mask]
+        else:
+            subset = agg
+    elif group == "시-군":
+        if target:
+            my_sgg = agg.loc[agg["지역"] == target, "시군구명"].iloc[0]
+            is_gun = str(my_sgg).endswith("군")
+            gun_mask = agg["시군구명"].astype(str).str.endswith("군", na=False)
+            subset = agg[gun_mask] if is_gun else agg[~gun_mask]
+        else:
+            subset = agg
     elif group == "인구규모 유사지역":
         if target:
             myg = agg.loc[agg["지역"] == target, "인구규모군"].iloc[0]
@@ -108,9 +126,9 @@ if is_sgg:
         else:
             subset = agg
     else:
-        subset = agg[agg["유형구분"] == group]
+        subset = agg
     if target and target not in subset["지역"].values:
-        st.warning(f"{target}는 '{group}'에 없어 전국 기준으로 표시합니다.")
+        st.warning(f"{target}는 '{group}' 비교집단에 없어 전국 기준으로 표시합니다.")
         subset, group = agg, "전국"
 else:
     subset = agg
