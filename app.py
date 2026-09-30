@@ -192,6 +192,29 @@ if not is_sgg and "출처" in sub.columns:
         cap += f" · 실측 {n_real}개"
     how = sub["집계방식"].iloc[0] if len(sub) else ""
     cap += f" · 집계방식: {how}"
+
+    # 집계 진단: 선택 지표가 정의 시트에서 어떤 집계방식/분모로 읽혔는지와
+    # 분모 시트 연결 상태를 함께 표시한다. 계산 로직은 변경하지 않는다.
+    _meta = raw[raw["지표명"] == ind]
+    if not _meta.empty:
+        _def_how = str(_meta["집계방식"].iloc[0]) if "집계방식" in _meta.columns else "(컬럼 없음)"
+        _def_den = str(_meta["집계_분모"].iloc[0]) if "집계_분모" in _meta.columns else "(컬럼 없음)"
+        _diag = f"정의읽기={_def_how}, 분모={_def_den or '(비어 있음)'}"
+
+        if _def_how == "가중평균":
+            if denom is None:
+                _diag += ", 분모시트=읽기 실패"
+            elif not _def_den:
+                _diag += ", 분모명=비어 있음"
+            elif _def_den not in denom.columns:
+                _diag += f", 분모열=없음"
+            else:
+                _regions = _meta[["지역"]].drop_duplicates()
+                _chk = _regions.merge(denom[["지역", _def_den]], on="지역", how="left")
+                _matched = int(pd.to_numeric(_chk[_def_den], errors="coerce").notna().sum())
+                _diag += f", 분모열=있음, 지역매칭={_matched}/{len(_chk)}"
+
+        cap += f" · 진단: {_diag}"
 st.caption(cap)
 
 if sub.empty:
