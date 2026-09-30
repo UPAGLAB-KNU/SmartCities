@@ -365,8 +365,16 @@ if not is_sgg:
     st.divider()
     st.subheader(f"{level} 시군구 분포")
 
-    sgg_t = core.add_tscore(raw)                         # 시군구 T점수는 전국 기준
-    hv = sgg_t[sgg_t["지표명"] == ind].dropna(subset=[mode]).copy()
+    # 시군구 분포는 현재 값 기준에 맞는 시군구 점수/원자료를 사용한다.
+    # T점수와 Min-Max는 전국 시군구 기준, 원자료는 변환 없이 사용한다.
+    if mode == "T점수":
+        sgg_view = core.add_tscore(raw)
+    elif mode == "Min-Max":
+        sgg_view = core.add_minmax(raw)
+    else:
+        sgg_view = raw.copy()
+
+    hv = sgg_view[sgg_view["지표명"] == ind].dropna(subset=[mode]).copy()
     hv = hv[hv[level_col].notna()]
     hv["클래스"] = hv[level_col].astype(str)
 
