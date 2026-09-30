@@ -48,6 +48,44 @@ if pack is None:
     st.stop()
 raw, denom, sido_actual = pack
 
+
+def ordered_unique(series):
+    """결측·공백을 제외하고 입력 데이터의 최초 등장 순서를 유지한다."""
+    vals = []
+    seen = set()
+    for x in series:
+        if pd.isna(x):
+            continue
+        v = str(x).strip()
+        if not v or v in seen:
+            continue
+        vals.append(v)
+        seen.add(v)
+    return vals
+
+
+def sort_by_order(df, col, order):
+    """지정한 입력 순서대로 안정적으로 정렬한다. 미등록 값은 뒤에 둔다."""
+    if col not in df.columns or not order:
+        return df
+    rank = {v: i for i, v in enumerate(order)}
+    out = df.copy()
+    out["_입력순서"] = out[col].astype(str).map(rank).fillna(len(rank))
+    out = out.sort_values("_입력순서", kind="stable").drop(columns="_입력순서")
+    return out
+
+
+# 선택·표·그래프에서 공통으로 사용할 입력 데이터 순서
+CAT_ORDER = ordered_unique(raw["대분류"])
+IND_ORDER = ordered_unique(raw["지표명"])
+SIDO_ORDER = ordered_unique(raw["시도명"])
+REGION_ORDER = ordered_unique(raw["지역"])
+SGG_ORDER_BY_SIDO = {
+    sido: ordered_unique(raw.loc[raw["시도명"].astype(str) == sido, "시군구명"])
+    for sido in SIDO_ORDER
+}
+IND_NO = {name: i + 1 for i, name in enumerate(IND_ORDER)}
+
 h1, h2 = st.columns([5, 1])
 with h1:
     st.title("스마트도시 서비스 수준 대시보드")
@@ -61,9 +99,10 @@ if err is not None:
 
 # ── 1행: 지표
 c1, c2, c3 = st.columns([2, 3, 1.5])
-cat = c1.selectbox("대분류", ["전체"] + sorted(raw["대분류"].dropna().unique()))
+cat = c1.selectbox("대분류", ["전체"] + CAT_ORDER)
 pool = raw if cat == "전체" else raw[raw["대분류"] == cat]
-ind = c2.selectbox("지표", sorted(pool["지표명"].unique()))
+pool_inds = [x for x in IND_ORDER if x in set(pool["지표명"].astype(str))]
+ind = c2.selectbox("지표", pool_inds)
 mode = c3.radio("값 기준", ["T점수", "Min-Max", "원자료"], horizontal=True)
 
 # ── 2행: 집계 수준
@@ -75,9 +114,8 @@ is_sgg = level_col is None
 # ── 3행: 지역·비교집단·시각화 대상
 c4, c5, c6, c7 = st.columns([2, 2, 2, 2])
 if is_sgg:
-    sido = c4.selectbox("시도", ["전체"] + sorted(raw["시도명"].unique()))
-    sgg_opts = ["전체"] + (sorted(raw[raw["시도명"] == sido]["시군구명"].unique())
-                          if sido != "전체" else [])
+    sido = c4.selectbox("시도", ["전체"] + SIDO_ORDER)
+    sgg_opts = ["전체"] + (SGG_ORDER_BY_SIDO.get(sido, []) if sido != "전체" else [])
     sgg = c5.selectbox("시군구", sgg_opts, disabled=(sido == "전체"))
     target = f"{sido} {sgg}" if (sido != "전체" and sgg != "전체") else None
     label = sgg
@@ -87,7 +125,7 @@ if is_sgg:
 
     # 비교집단은 점수 산정 기준, 시각화 대상은 화면에 표시할 지역 필터
     if group == "동일 시도":
-        visual_options = ["전체"] + sorted(raw["시도명"].dropna().astype(str).unique())
+        visual_options = ["전체"] + SIDO_ORDER
     elif group == "특광역시-도":
         visual_options = ["전체", "특광역시", "도"]
     elif group == "시-군":
@@ -100,7 +138,14 @@ if is_sgg:
         visual_options = ["전체"]
     visual_target = c7.selectbox("시각화 대상", visual_options)
 else:
-    units = [u for u in raw[level_col].dropna().unique()]
+    if level_col == "시도명":
+        units = SIDO_ORDER
+    elif level_col == "인구규모군":
+        present = set(raw[level_col].dropna().astype(str))
+        units = [x for x in getattr(core, "POP_LABELS", []) if x in present]
+        units += [x for x in ordered_unique(raw[level_col]) if x not in units]
+    else:
+        units = ordered_unique(raw[level_col])
     target = c4.selectbox(level.replace("별", ""), ["전체"] + list(units))
     target = None if target == "전체" else target
     label = target
@@ -286,7 +331,13 @@ with left:
                           xaxis_title=mode, yaxis_title="지역 수",
                           margin=dict(t=40, b=40))
     else:                                        # 단위가 적으면 막대그래프
-        d = sub.sort_values(mode, ascending=True)
+        if level_col == "시도명":
+            graph_order = SIDO_ORDER
+        elif level_col == "인구규모군":
+            graph_order = units
+        else:
+            graph_order = units
+        d = sort_by_order(sub, "지역", graph_order)
         colors = ["#D62728" if r == target else
                   ("#1F4E9C" if v >= (50 if mode == "T점수" else d[mode].median())
                    else "#9BB8DE")
@@ -301,6 +352,9 @@ with left:
         if mode == "T점수":
             fig.add_vline(x=50, line_dash="dash", line_color="gray")
         fig.update_layout(height=max(400, 45 * len(d) + 80), xaxis_title=mode,
+                          yaxis=dict(categoryorder="array",
+                                     categoryarray=d["지역"].astype(str).tolist(),
+                                     autorange="reversed"),
                           showlegend=False, margin=dict(t=40, b=40, l=10))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -406,7 +460,8 @@ if not is_sgg:
     n_clip = int((hv[mode] > hcut).sum())
 
     rows = [str(r) for r in d["지역"]]                    # 막대그래프와 같은 순서
-    rows = sorted(set(hv["클래스"]) - set(rows)) + rows
+    missing_rows = [x for x in units if x in set(hv["클래스"]) and x not in set(rows)]
+    rows = missing_rows + rows
 
     ct = (hv.groupby(["클래스", "급간"]).size().unstack(fill_value=0)
           .reindex(index=rows, columns=range(nbin), fill_value=0))
@@ -531,14 +586,28 @@ with st.expander("세부지표 전체 보기", expanded=False):
         if not is_sgg:
             c += ["집계방식", "구성지역수", "출처"]
         c = [x for x in c if x in view.columns]
-        tbl = view[view["지역"] == target][c].sort_values(["대분류", "지표명"])
-        st.caption(f"{target} · {len(tbl)}개 지표")
+        tbl = view[view["지역"] == target][c].copy()
+        tbl.insert(0, "번호", tbl["지표명"].map(IND_NO))
+        tbl = tbl.sort_values("번호", kind="stable")
+        st.caption(f"{target} · {len(tbl)}개 지표 · 번호는 입력 데이터의 지표 순서")
     else:
         index_cols = [x for x in ["시도명", "도시규모유형", "지역"] if x in view.columns]
-        tbl = (view.pivot_table(index=index_cols, columns="지표명", values=mode)
+        present_inds = [x for x in IND_ORDER if x in set(view["지표명"].astype(str))]
+        tbl = (view.pivot_table(index=index_cols, columns="지표명", values=mode, sort=False)
+               .reindex(columns=present_inds)
                .round(1).reset_index())
-        n_indicator_cols = len(tbl.columns) - len(index_cols)
-        st.caption(f"{len(tbl)}개 단위 × {n_indicator_cols}개 지표 · 값 기준 {mode}")
+        # 행도 입력 데이터의 지역/상위단위 순서를 유지한다.
+        if "지역" in tbl.columns:
+            if is_sgg:
+                tbl = sort_by_order(tbl, "지역", REGION_ORDER)
+            elif level_col == "시도명":
+                tbl = sort_by_order(tbl, "지역", SIDO_ORDER)
+            else:
+                tbl = sort_by_order(tbl, "지역", units)
+        # 정렬 기능을 사용해도 원래 지표 순서를 확인할 수 있도록 번호를 열 이름에 붙인다.
+        tbl = tbl.rename(columns={x: f"{IND_NO.get(x, 0):02d}. {x}" for x in present_inds})
+        n_indicator_cols = len(present_inds)
+        st.caption(f"{len(tbl)}개 단위 × {n_indicator_cols}개 지표 · 값 기준 {mode} · 지표 번호는 입력 순서")
     st.dataframe(tbl, use_container_width=True, hide_index=True, height=520)
     st.download_button("CSV 내려받기",
                        tbl.to_csv(index=False).encode("utf-8-sig"),
@@ -570,7 +639,8 @@ if is_sgg:
                                      if c in score_tbl.columns]]
 
         # wide 형식: 지역을 행으로, 분야 및 종합을 열로 표시
-        item_order = list(field_scores["항목"].dropna().drop_duplicates()) + ["종합"]
+        field_present = set(field_scores["항목"].dropna().astype(str))
+        item_order = [x for x in CAT_ORDER if x in field_present] + ["종합"]
         index_cols = [c for c in ["시도명", "도시규모유형", "지역"] if c in score_tbl.columns]
         wide = score_tbl.pivot(index=index_cols, columns="항목", values=["Min-Max점수", "T점수"])
         wide = wide.reindex(columns=pd.MultiIndex.from_product(
@@ -578,6 +648,8 @@ if is_sgg:
         ))
         wide.columns = [f"{score_type} | {item}" for score_type, item in wide.columns]
         wide = wide.reset_index()
+        if "지역" in wide.columns:
+            wide = sort_by_order(wide, "지역", REGION_ORDER)
 
         fmt = {c: "{:.1f}" for c in wide.columns if c not in index_cols}
         st.dataframe(
