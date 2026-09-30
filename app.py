@@ -735,47 +735,80 @@ with st.expander("세부지표 전체 보기", expanded=False):
                        file_name=f"smartcity_{level}_{cat}_{mode}.csv",
                        mime="text/csv")
 
-# ── 분야별·종합 점수 보기 (시군구 수준)
-if is_sgg:
-    with st.expander("분야별·종합 점수 보기", expanded=False):
-        field_scores, total_scores = build_scores_for_current_group(base)
-        score_tbl = pd.concat([field_scores, total_scores], ignore_index=True)
-        if target:
-            score_tbl = score_tbl[score_tbl["지역"] == target]
+# ── 분야별·종합 점수 보기
+with st.expander("분야별·종합 점수 보기", expanded=False):
+    field_scores, total_scores = build_scores_for_current_group(base)
+    score_tbl = pd.concat([field_scores, total_scores], ignore_index=True)
+
+    if target:
+        score_tbl = score_tbl[score_tbl["지역"] == target]
+        if is_sgg:
             st.caption(f"{target} · 지표 가중치 적용 (현재 기본값 1)")
         else:
+            st.caption(
+                f"{target} · {level} 집계 · 지표 가중치 적용 (현재 기본값 1) · "
+                "부문·종합점수는 재표준화하지 않은 0~100 결합점수")
+    else:
+        if is_sgg:
             if visual_target != "전체":
                 show_regions = set(display_base["지역"].dropna().unique())
                 score_tbl = score_tbl[score_tbl["지역"].isin(show_regions)]
-            st.caption(f"{group} 비교집단 · 시각화 대상 {visual_target} · 지표 가중치 적용 (현재 기본값 1)")
+            st.caption(
+                f"{group} 비교집단 · 시각화 대상 {visual_target} · "
+                "지표 가중치 적용 (현재 기본값 1)")
+        else:
+            st.caption(
+                f"{level} 전체 {len(units)}개 단위 · 지표 가중치 적용 (현재 기본값 1) · "
+                "부문·종합점수는 재표준화하지 않은 0~100 결합점수")
 
-        # 지역 메타정보 추가: 시도명, 도시규모유형
+    # 시군구 수준에서는 기존 메타정보를 유지한다.
+    # 상위 집계수준에서는 집계 단위명(지역) 자체가 행 식별자다.
+    if is_sgg:
         region_meta_cols = [c for c in ["지역", "시도명", "인구규모군"] if c in base.columns]
         region_meta = base.drop_duplicates("지역")[region_meta_cols].copy()
         if "인구규모군" in region_meta.columns:
             region_meta = region_meta.rename(columns={"인구규모군": "도시규모유형"})
         score_tbl = score_tbl.merge(region_meta, on="지역", how="left")
-        score_tbl = score_tbl[[c for c in ["시도명", "도시규모유형", "지역", "항목",
-                                                  "Min-Max점수", "T점수", "지표수", "가중치합"]
-                                     if c in score_tbl.columns]]
+        id_cols = [c for c in ["시도명", "도시규모유형", "지역"] if c in score_tbl.columns]
+    else:
+        id_cols = ["지역"]
 
-        # wide 형식: 지역을 행으로, 분야 및 종합을 열로 표시
-        field_present = set(field_scores["항목"].dropna().astype(str))
-        item_order = [x for x in CAT_ORDER if x in field_present] + ["종합"]
-        index_cols = [c for c in ["시도명", "도시규모유형", "지역"] if c in score_tbl.columns]
-        wide = score_tbl.pivot(index=index_cols, columns="항목", values=["Min-Max점수", "T점수"])
-        wide = wide.reindex(columns=pd.MultiIndex.from_product(
-            [["Min-Max점수", "T점수"], [c for c in item_order if c in score_tbl["항목"].values]]
-        ))
-        wide.columns = [f"{score_type} | {item}" for score_type, item in wide.columns]
-        wide = wide.reset_index()
-        if "지역" in wide.columns:
+    score_tbl = score_tbl[[c for c in id_cols + ["항목", "Min-Max점수", "T점수",
+                                                  "지표수", "가중치합",
+                                                  "유효지표수", "유효가중치비율"]
+                                 if c in score_tbl.columns]]
+
+    # wide 형식: 지역/집계단위를 행으로, 분야 및 종합을 열로 표시
+    field_present = set(field_scores["항목"].dropna().astype(str))
+    item_order = [x for x in CAT_ORDER if x in field_present] + ["종합"]
+    value_cols = ["Min-Max점수", "T점수"]
+    wide = score_tbl.pivot(index=id_cols, columns="항목", values=value_cols)
+    wide = wide.reindex(columns=pd.MultiIndex.from_product(
+        [value_cols, [c for c in item_order if c in score_tbl["항목"].values]]
+    ))
+    wide.columns = [f"{score_type} | {item}" for score_type, item in wide.columns]
+    wide = wide.reset_index()
+
+    if "지역" in wide.columns:
+        if is_sgg:
             wide = sort_by_order(wide, "지역", REGION_ORDER)
+        elif level_col == "시도명":
+            wide = sort_by_order(wide, "지역", SIDO_ORDER)
+        else:
+            wide = sort_by_order(wide, "지역", units)
 
-        fmt = {c: "{:.1f}" for c in wide.columns if c not in index_cols}
-        st.dataframe(
-            wide.style.format(fmt),
-            use_container_width=True, hide_index=True, height=520)
+    # 상위 집계수준에서는 T점수 열이 '재표준화 T'가 아니라
+    # 앞서 합의한 T기반 0~100 결합점수임을 열 이름에서 명확히 표시한다.
+    if not is_sgg:
+        wide = wide.rename(columns={
+            c: c.replace("T점수 |", "T기반 0~100점수 |")
+            for c in wide.columns if isinstance(c, str) and c.startswith("T점수 |")
+        })
+
+    fmt = {c: "{:.1f}" for c in wide.columns if c not in id_cols}
+    st.dataframe(
+        wide.style.format(fmt),
+        use_container_width=True, hide_index=True, height=520)
 
 st.divider()
 st.caption(f"{FORMULA} · 데이터 기준 {ts:%Y-%m-%d %H:%M:%S}")
