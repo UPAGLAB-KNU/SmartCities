@@ -97,13 +97,32 @@ with h2:
 if err is not None:
     st.warning(f"시트 읽기 실패 — 마지막 정상 데이터({ts:%H:%M:%S}) 표시 중. 사유: {err}")
 
-# ── 1행: 지표
-c1, c2, c3 = st.columns([2, 3, 1.5])
-cat = c1.selectbox("대분류", ["전체"] + CAT_ORDER)
-pool = raw if cat == "전체" else raw[raw["대분류"] == cat]
-pool_inds = [x for x in IND_ORDER if x in set(pool["지표명"].astype(str))]
-ind = c2.selectbox("지표", pool_inds)
-mode = c3.radio("값 기준", ["T점수", "Min-Max", "원자료"], horizontal=True)
+# ── 1행: 시각화 항목 · 지표/부문 · 값 기준
+c0, c1, c2, c3 = st.columns([1.5, 2, 3, 1.5])
+metric_type = c0.selectbox("시각화 항목", ["세부지표", "부문점수", "종합점수"])
+
+if metric_type == "세부지표":
+    cat = c1.selectbox("대분류", ["전체"] + CAT_ORDER)
+    pool = raw if cat == "전체" else raw[raw["대분류"] == cat]
+    pool_inds = [x for x in IND_ORDER if x in set(pool["지표명"].astype(str))]
+    ind = c2.selectbox("지표", pool_inds)
+    metric_label = ind
+    mode_options = ["T점수", "Min-Max", "원자료"]
+elif metric_type == "부문점수":
+    cat = c1.selectbox("부문", CAT_ORDER)
+    ind = None
+    c2.caption(f"{cat} 부문에 포함된 세부지표를 결합한 점수")
+    metric_label = f"{cat} 부문점수"
+    mode_options = ["T점수", "Min-Max"]
+else:
+    cat = "전체"
+    ind = None
+    c1.caption("전체 부문")
+    c2.caption("전체 세부지표를 결합한 종합점수")
+    metric_label = "종합점수"
+    mode_options = ["T점수", "Min-Max"]
+
+mode = c3.radio("값 기준", mode_options, horizontal=True)
 
 # ── 2행: 집계 수준
 level = st.selectbox("집계 수준",
@@ -228,10 +247,46 @@ def build_scores_for_current_group(scored):
     return field_scores, total_scores
 
 
-sub = display_base[display_base["지표명"] == ind].dropna(subset=[mode])
+# ── 현재 시각화 항목을 공통 형식(sub)으로 구성
+# 세부지표는 기존 점수/원자료를 그대로 사용하고, 부문·종합은 이미 계산된
+# Min-Max점수와 재표준화 T점수를 현재 그래프/지도 형식에 맞춰 연결한다.
+if metric_type == "세부지표":
+    sub = display_base[display_base["지표명"] == ind].dropna(subset=[mode]).copy()
+else:
+    field_scores, total_scores = build_scores_for_current_group(base)
+    score_df = (field_scores[field_scores["항목"] == cat].copy()
+                if metric_type == "부문점수" else total_scores.copy())
 
-cap = f"{level} · 비교집단 {group} 기준 · 시각화 대상 {visual_target} · 유효 {len(sub)}개 / 전체 {base['지역'].nunique()}개"
-if not is_sgg and "출처" in sub.columns:
+    # 시각화 대상은 점수 계산 후 표시 단계에서만 적용
+    if is_sgg and visual_target != "전체":
+        show_regions = set(display_base["지역"].dropna().astype(str))
+        score_df = score_df[score_df["지역"].astype(str).isin(show_regions)]
+
+    score_df["Min-Max"] = score_df["Min-Max점수"]
+    score_df["백분위"] = (score_df["백분위_T"]
+                          if mode == "T점수" else score_df["백분위_MinMax"])
+    score_df["원자료"] = np.nan
+    score_df["출처"] = "산출점수"
+
+    # 지도/그래프와 선택지역 표시를 위해 현재 단위의 메타정보를 붙인다.
+    meta_cols = [c for c in ["지역", "시도명", "시군구명", "인구규모군",
+                              level_col, "구성지역수"]
+                 if c is not None and c in base.columns]
+    if meta_cols:
+        region_meta = base[meta_cols].drop_duplicates("지역").copy()
+        add_cols = [c for c in region_meta.columns if c != "지역" and c not in score_df.columns]
+        if add_cols:
+            score_df = score_df.merge(region_meta[["지역"] + add_cols], on="지역", how="left")
+    if "구성지역수" not in score_df.columns:
+        score_df["구성지역수"] = 1
+
+    sub = score_df.dropna(subset=[mode]).copy()
+
+cap = (f"{level} · {metric_label} · 비교집단 {group} 기준 · "
+       f"시각화 대상 {visual_target} · 유효 {len(sub)}개 / 전체 {base['지역'].nunique()}개")
+
+# 세부지표의 상위단위 집계일 때만 원자료 집계방식과 진단을 표시한다.
+if metric_type == "세부지표" and not is_sgg and "출처" in sub.columns:
     n_real = int((sub["출처"] == "실측").sum())
     if n_real:
         cap += f" · 실측 {n_real}개"
@@ -264,10 +319,12 @@ if not is_sgg and "출처" in sub.columns:
                 _diag += f", 분모열=있음, 지역매칭={_matched}/{len(_chk)}"
 
         cap += f" · 진단: {_diag}"
+elif metric_type != "세부지표":
+    cap += " · 세부지표 결합점수"
 st.caption(cap)
 
 if sub.empty:
-    st.info("이 지표는 현재 값 기준으로 표시할 값이 없습니다.")
+    st.info("현재 선택한 항목은 이 값 기준으로 표시할 값이 없습니다.")
     st.stop()
 
 # ── 요약통계
@@ -297,7 +354,9 @@ if is_sgg:
     else:
         pctl = st.select_slider("극단값 묶기 기준 (상위 백분위)",
                                 options=[80, 85, 90, 95, 99, 100], value=95)
-        CUT = float(sub["원자료"].quantile(pctl / 100))
+        # Min-Max/부문·종합 점수는 현재 표시값 자체의 백분위를 사용한다.
+        # 원자료 모드일 때만 원자료 기준으로 계산된다.
+        CUT = float(sub[mode].quantile(pctl / 100))
         cut_label = f"{CUT:,.4g}"
 else:
     CUT = float(sub[mode].max())
@@ -362,7 +421,10 @@ with right:
     st.subheader("공간분포")
     geo = load_geo()
 
-    cols_need = ["지역", mode, "원자료", "T점수", "백분위"]
+    if metric_type == "세부지표":
+        cols_need = ["지역", mode, "원자료", "T점수", "백분위"]
+    else:
+        cols_need = ["지역", mode, "Min-Max", "T점수", "백분위"]
     cols_need = list(dict.fromkeys(cols_need))          # mode 중복 제거
 
     if is_sgg:
@@ -376,6 +438,17 @@ with right:
                 .rename(columns={"시군구": "지역"}))
     zmax = CUT
     zmin = 40 if mode == "T점수" else float(pmap[mode].min())
+
+    if metric_type == "세부지표":
+        map_custom = np.stack([pmap["원자료"], pmap["T점수"], pmap["백분위"]], axis=-1)
+        map_hover = ("<b>%{location}</b><br>원자료 %{customdata[0]:.2f}"
+                     "<br>T점수 %{customdata[1]:.1f}"
+                     "<br>백분위 %{customdata[2]:.0f}<extra></extra>")
+    else:
+        map_custom = np.stack([pmap["Min-Max"], pmap["T점수"], pmap["백분위"]], axis=-1)
+        map_hover = ("<b>%{location}</b><br>Min-Max %{customdata[0]:.1f}"
+                     "<br>T점수 %{customdata[1]:.1f}"
+                     "<br>백분위 %{customdata[2]:.0f}<extra></extra>")
            
     fig3 = go.Figure(go.Choropleth(
         geojson=geo, locations=pmap["지역"], z=pmap[mode].clip(zmin, zmax),
@@ -383,10 +456,7 @@ with right:
         colorscale="Blues", zmin=zmin, zmax=zmax,
         marker_line_color="#8c8c8c", marker_line_width=0.5,
         colorbar=dict(title=mode, thickness=12, len=0.6, x=0.93, y=0.35),
-        customdata=np.stack([pmap["원자료"], pmap["T점수"], pmap["백분위"]], axis=-1),
-        hovertemplate="<b>%{location}</b><br>원자료 %{customdata[0]:.2f}"
-                      "<br>T점수 %{customdata[1]:.1f}"
-                      "<br>상위 %{customdata[2]:.0f}%<extra></extra>"))
+        customdata=map_custom, hovertemplate=map_hover))
 
     miss = set(f["properties"]["지역"] for f in geo["features"]) - set(pmap["지역"])
     if miss:
@@ -419,16 +489,28 @@ if not is_sgg:
     st.divider()
     st.subheader(f"{level} 시군구 분포")
 
-    # 시군구 분포는 현재 값 기준에 맞는 시군구 점수/원자료를 사용한다.
-    # T점수와 Min-Max는 전국 시군구 기준, 원자료는 변환 없이 사용한다.
-    if mode == "T점수":
-        sgg_view = core.add_tscore(raw)
-    elif mode == "Min-Max":
-        sgg_view = core.add_minmax(raw)
+    # 시군구 분포는 현재 시각화 항목에 대응하는 시군구 수준 값을 사용한다.
+    # 세부지표의 T/Min-Max는 전국 시군구 기준이며, 부문·종합 점수도
+    # 전국 시군구 점수를 결합한 뒤 부문/종합 T를 재표준화해서 사용한다.
+    if metric_type == "세부지표":
+        if mode == "T점수":
+            sgg_view = core.add_tscore(raw)
+        elif mode == "Min-Max":
+            sgg_view = core.add_minmax(raw)
+        else:
+            sgg_view = raw.copy()
+        hv = sgg_view[sgg_view["지표명"] == ind].dropna(subset=[mode]).copy()
     else:
-        sgg_view = raw.copy()
+        sgg_scored = core.add_minmax(core.add_tscore(raw))
+        sgg_field, sgg_total = core.build_field_total_scores(sgg_scored)
+        hv = (sgg_field[sgg_field["항목"] == cat].copy()
+              if metric_type == "부문점수" else sgg_total.copy())
+        hv["Min-Max"] = hv["Min-Max점수"]
+        hv["백분위"] = hv["백분위_T"] if mode == "T점수" else hv["백분위_MinMax"]
+        # 상위단위 분류(시도/도시규모/권역)를 시군구 지역키로 붙인다.
+        class_meta = raw.drop_duplicates("지역")[["지역", level_col]]
+        hv = hv.merge(class_meta, on="지역", how="left").dropna(subset=[mode])
 
-    hv = sgg_view[sgg_view["지표명"] == ind].dropna(subset=[mode]).copy()
     hv = hv[hv[level_col].notna()]
     hv["클래스"] = hv[level_col].astype(str)
 
