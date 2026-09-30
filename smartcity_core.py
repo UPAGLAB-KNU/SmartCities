@@ -171,17 +171,43 @@ def aggregate(long, level_col, denom=None, sido_actual=None):
         elif how == "합산":
             val = v.sum() if n_valid else np.nan
         elif how == "가중평균":
+            # 가중평균 진단정보를 집계방식에 함께 표시한다.
+            # 계산 자체는 기존과 동일하고, 왜 단순평균으로 대체되었는지만 구분한다.
+            dname = str(meta["집계_분모"]).strip()
             w = None
-            dname = meta["집계_분모"]
-            if denom is not None and dname and dname in denom.columns:
-                w = g[["지역"]].merge(denom[["지역", dname]], on="지역",
-                                      how="left")[dname].values
-            if w is not None and np.nansum(w) > 0:
-                m = v.notna().values & ~pd.isna(w)
-                val = np.nansum(v.values[m] * w[m]) / np.nansum(w[m]) if m.any() else np.nan
+
+            if denom is None:
+                val = v.mean()
+                how = "단순평균(분모 시트 읽기 실패)"
+            elif not dname:
+                val = v.mean()
+                how = "단순평균(분모명 미지정)"
+            elif dname not in denom.columns:
+                val = v.mean()
+                how = f"단순평균(분모열 없음: {dname})"
             else:
-                val = v.mean()                          # 분모 없으면 단순평균
-                how = "단순평균(분모 없음)"
+                tmp = g[["지역"]].merge(
+                    denom[["지역", dname]], on="지역", how="left")
+                w = pd.to_numeric(tmp[dname], errors="coerce").values
+
+                n_group = len(g)
+                n_weight = int(np.sum(~pd.isna(w)))
+                m = v.notna().values & ~pd.isna(w)
+                n_used = int(np.sum(m))
+                weight_sum = float(np.nansum(w[m])) if n_used else 0.0
+
+                if n_used == 0:
+                    val = v.mean()
+                    how = (f"단순평균(분모 지역매칭/값 없음: {dname}; "
+                           f"분모매칭 {n_weight}/{n_group})")
+                elif weight_sum <= 0:
+                    val = v.mean()
+                    how = (f"단순평균(분모합 0: {dname}; "
+                           f"분모매칭 {n_weight}/{n_group}, 계산사용 {n_used}곳)")
+                else:
+                    val = np.nansum(v.values[m] * w[m]) / weight_sum
+                    how = (f"가중평균(분모={dname}; "
+                           f"분모매칭 {n_weight}/{n_group}, 계산사용 {n_used}곳)")
         else:
             val = v.mean() if n_valid else np.nan
 
