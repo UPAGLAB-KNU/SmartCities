@@ -202,7 +202,11 @@ if not is_sgg and "출처" in sub.columns:
         _diag = f"정의읽기={_def_how}, 분모={_def_den or '(비어 있음)'}"
 
         if _def_how == "가중평균":
-            if denom is None:
+            _denom_error = (denom.attrs.get("load_error", "")
+                            if isinstance(denom, pd.DataFrame) else "")
+            if _denom_error:
+                _diag += f", 분모시트오류={_denom_error}"
+            elif denom is None:
                 _diag += ", 분모시트=읽기 실패"
             elif not _def_den:
                 _diag += ", 분모명=비어 있음"
