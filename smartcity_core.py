@@ -45,7 +45,14 @@ def to_num(s):
 
 def load_definitions(raw):
     df = pd.DataFrame(raw[1:], columns=raw[0])
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # 시군구지표정의의 고정 위치(J=집계 분모, K=집계 방식)를 원문 그대로 보존한다.
+    # 구글시트 CSV 헤더에 보이지 않는 공백/개행 등이 섞여 정확한 헤더명이
+    # 매칭되지 않는 경우에도 J/K 값을 사용할 수 있도록 하는 최소 안전장치다.
+    pos_denom = df.iloc[:, 9].astype(str) if df.shape[1] > 9 else pd.Series("", index=df.index)
+    pos_how = df.iloc[:, 10].astype(str) if df.shape[1] > 10 else pd.Series("", index=df.index)
+
     df = df.rename(columns={"테이터유형": "데이터유형", "지표 계산": "지표계산",
                             "데이터시트 열번호": "열번호",
                             "합계_분모": "집계_분모", "합계_방식": "집계방식",
@@ -53,6 +60,12 @@ def load_definitions(raw):
     for c in ["집계_분모", "집계방식", "열번호"]:
         if c not in df.columns:
             df[c] = ""
+
+    # 헤더 인식이 실패했거나 일부 행이 비어 있으면 J/K의 실제 셀값으로 보완한다.
+    den_blank = df["집계_분모"].astype(str).str.strip().eq("")
+    how_blank = df["집계방식"].astype(str).str.strip().eq("")
+    df.loc[den_blank, "집계_분모"] = pos_denom.loc[den_blank].values
+    df.loc[how_blank, "집계방식"] = pos_how.loc[how_blank].values
 
     # 시군구지표정의 L열의 가중치 사용. 헤더가 없으면 L열 값을 직접 사용하고,
     # 값이 비어 있으면 기본값 1로 처리한다.
