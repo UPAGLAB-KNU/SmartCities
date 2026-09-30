@@ -17,6 +17,10 @@ CAPITAL = ["서울특별시", "인천광역시", "경기도"]
 LEVELS = {"시군구별": None, "시도별": "시도명",
           "도시규모별": "인구규모군", "수도권-비수도권": "권역"}
 
+# 부문·종합 점수 산출에 필요한 최소 유효 가중치 비율.
+# 예: 0.70이면 해당 부문/전체 지표 가중치의 70% 이상이 유효해야 점수를 산출한다.
+MIN_SCORE_COVERAGE = 0.70
+
 
 def fetch_grid(sheet_id, gid):
     """gid로 CSV를 받아 문자열 2차원 배열로 반환"""
@@ -269,13 +273,24 @@ def aggregate(long, level_col, denom=None, sido_actual=None):
 
 
 def add_tscore(long, group_col=None):
-    """group_col=None이면 전체, 컬럼명을 주면 그 안에서 표준화"""
+    """group_col=None이면 전체, 컬럼명을 주면 그 안에서 표준화.
+
+    비교집단의 유효값이 1개이거나 분산이 0이면 상대적 차이를 계산할 수 없으므로
+    중립값 T=50으로 처리한다. (예: 동일 시도 비교에서 세종시)
+    """
     out = long.copy()
     keys = ["지표명"] + ([group_col] if group_col else [])
     g = out.groupby(keys)["원자료"]
-    z = (out["원자료"] - g.transform("mean")) / g.transform("std").replace(0, np.nan)
+    mean = g.transform("mean")
+    sd = g.transform("std")
+    count = g.transform("count")
+    z = (out["원자료"] - mean) / sd.replace(0, np.nan)
     out["Z점수"] = z * out["방향"]
     out["T점수"] = 50 + 10 * out["Z점수"]
+
+    neutral = out["원자료"].notna() & ((count <= 1) | sd.eq(0) | sd.isna())
+    out.loc[neutral, "Z점수"] = 0.0
+    out.loc[neutral, "T점수"] = 50.0
     out["백분위"] = out.groupby(keys)["Z점수"].rank(pct=True) * 100
     return out
 
@@ -317,12 +332,14 @@ def _restandardize(series):
     return 50 + 10 * (s - mean) / sd
 
 
-def build_field_total_scores(scored):
+def build_field_total_scores(scored, min_coverage=MIN_SCORE_COVERAGE):
     """
     시군구(또는 현재 비교집단) 자료에서 분야별·종합 점수를 산출.
     - Min-Max: 개별 Min-Max 점수의 가중평균
     - T 방식: 개별 T를 S=clip(100*(T-20)/60, 0, 100)으로 환산해 가중평균 후
       분야 및 종합 점수를 다시 T점수화
+    - 결측치가 많은 지역의 과대평가를 막기 위해, 유효 가중치 비율이
+      ``min_coverage`` 미만이면 해당 부문/종합 점수를 산출하지 않는다.
     """
     d = scored.copy()
     if "Min-Max" not in d.columns:
@@ -332,19 +349,35 @@ def build_field_total_scores(scored):
 
     d["T합산점수"] = ((d["T점수"] - 20) / 60 * 100).clip(0, 100)
 
+    def _weights(g):
+        if "가중치" in g.columns:
+            return pd.to_numeric(g["가중치"], errors="coerce").fillna(1.0).clip(lower=0)
+        return pd.Series(1.0, index=g.index, dtype=float)
+
+    def _coverage(g):
+        w = _weights(g)
+        total_w = float(w.sum())
+        # 원자료가 존재해야 해당 지표를 유효한 것으로 본다.
+        valid_mask = g["원자료"].notna() if "원자료" in g.columns else g["Min-Max"].notna()
+        valid_w = float(w[valid_mask].sum())
+        ratio = valid_w / total_w if total_w > 0 else np.nan
+        return total_w, valid_w, ratio, int(valid_mask.sum())
+
     # 분야별
     rows = []
     for (region, field), g in d.groupby(["지역", "대분류"], observed=True):
-        w = (pd.to_numeric(g["가중치"], errors="coerce").fillna(1.0)
-             if "가중치" in g.columns else pd.Series(1.0, index=g.index))
-        valid_w = w[g["Min-Max"].notna()]
+        total_w, valid_w, coverage, n_valid = _coverage(g)
+        enough = pd.notna(coverage) and coverage >= min_coverage
         rows.append({
             "지역": region,
             "항목": field,
-            "Min-Max점수": _weighted_average(g, "Min-Max"),
-            "T원점수": _weighted_average(g, "T합산점수"),
+            "Min-Max점수": _weighted_average(g, "Min-Max") if enough else np.nan,
+            "T원점수": _weighted_average(g, "T합산점수") if enough else np.nan,
             "지표수": int(g["지표명"].nunique()),
-            "가중치합": float(valid_w.sum()) if len(valid_w) else 0.0,
+            "유효지표수": n_valid,
+            "가중치합": valid_w,
+            "전체가중치합": total_w,
+            "유효가중치비율": coverage,
         })
     field = pd.DataFrame(rows)
     if not field.empty:
@@ -355,16 +388,18 @@ def build_field_total_scores(scored):
     # 종합: 분야평균이 아니라 전체 개별지표에 각 지표 가중치를 직접 적용
     rows = []
     for region, g in d.groupby("지역", observed=True):
-        w = (pd.to_numeric(g["가중치"], errors="coerce").fillna(1.0)
-             if "가중치" in g.columns else pd.Series(1.0, index=g.index))
-        valid_w = w[g["Min-Max"].notna()]
+        total_w, valid_w, coverage, n_valid = _coverage(g)
+        enough = pd.notna(coverage) and coverage >= min_coverage
         rows.append({
             "지역": region,
             "항목": "종합",
-            "Min-Max점수": _weighted_average(g, "Min-Max"),
-            "T원점수": _weighted_average(g, "T합산점수"),
+            "Min-Max점수": _weighted_average(g, "Min-Max") if enough else np.nan,
+            "T원점수": _weighted_average(g, "T합산점수") if enough else np.nan,
             "지표수": int(g["지표명"].nunique()),
-            "가중치합": float(valid_w.sum()) if len(valid_w) else 0.0,
+            "유효지표수": n_valid,
+            "가중치합": valid_w,
+            "전체가중치합": total_w,
+            "유효가중치비율": coverage,
         })
     total = pd.DataFrame(rows)
     if not total.empty:
