@@ -86,13 +86,19 @@ SGG_ORDER_BY_SIDO = {
 }
 IND_NO = {name: i + 1 for i, name in enumerate(IND_ORDER)}
 
-h1, h2 = st.columns([5, 1])
+h1, h2, h3 = st.columns([5, 1.2, 1.4])
 with h1:
     st.title("스마트도시 서비스 수준 대시보드")
     st.caption(f"데이터 기준: {ts:%Y-%m-%d %H:%M:%S}")
 with h2:
     if st.button("🔄 새로 읽기", use_container_width=True):
         fetch.clear()
+        st.rerun()
+with h3:
+    if st.button("🧹 캐시 초기화", use_container_width=True,
+                 help="원자료·점수 계산·지도 캐시를 모두 지우고 다시 계산합니다."):
+        st.cache_data.clear()
+        st.session_state.pop("last_good", None)
         st.rerun()
 if err is not None:
     st.warning(f"시트 읽기 실패 — 마지막 정상 데이터({ts:%H:%M:%S}) 표시 중. 사유: {err}")
@@ -175,35 +181,42 @@ else:
     c7.empty()
 
 # ── 집계 및 표준화
-agg = core.aggregate(raw, level_col, denom, sido_actual)
+# 집계수준·비교집단·원자료가 같으면 결과를 재사용한다.
+# 시각화 항목(세부지표/부문/종합), 선택 지표·부문, 값 기준은
+# 이 계산 함수의 입력이 아니므로 그 선택만 바꿀 때는 재계산하지 않는다.
+@st.cache_data(show_spinner=False)
+def build_scored_base(raw_df, denom_df, sido_actual_df, level_col_arg, group_arg):
+    agg_df = core.aggregate(raw_df, level_col_arg, denom_df, sido_actual_df)
+    is_sgg_arg = level_col_arg is None
+    score_col = None
 
-# 시군구별에서는 특정 지역을 골라내는 필터가 아니라, 각 시군구가 속한
-# 비교집단 안에서 점수를 계산한 뒤 전국 모든 시군구를 그대로 표시한다.
-if is_sgg:
-    subset = agg.copy()
-    score_group_col = None
+    if is_sgg_arg:
+        subset_df = agg_df.copy()
+        if group_arg == "동일 시도":
+            score_col = "시도명"
+        elif group_arg == "특광역시-도":
+            score_col = "_비교집단"
+            metro_mask = subset_df["시도명"].astype(str).str.contains(
+                "특별시|광역시|특별자치시", regex=True, na=False)
+            subset_df[score_col] = np.where(metro_mask, "특광역시", "도")
+        elif group_arg == "시-군":
+            score_col = "_비교집단"
+            gun_mask = subset_df["시군구명"].astype(str).str.endswith("군", na=False)
+            subset_df[score_col] = np.where(gun_mask, "군", "시·구")
+        elif group_arg == "인구규모 유사지역":
+            score_col = "인구규모군"
 
-    if group == "동일 시도":
-        score_group_col = "시도명"
-    elif group == "특광역시-도":
-        score_group_col = "_비교집단"
-        metro_mask = subset["시도명"].astype(str).str.contains(
-            "특별시|광역시|특별자치시", regex=True, na=False)
-        subset[score_group_col] = np.where(metro_mask, "특광역시", "도")
-    elif group == "시-군":
-        score_group_col = "_비교집단"
-        gun_mask = subset["시군구명"].astype(str).str.endswith("군", na=False)
-        subset[score_group_col] = np.where(gun_mask, "군", "시·구")
-    elif group == "인구규모 유사지역":
-        score_group_col = "인구규모군"
+        scored_df = core.add_minmax(
+            core.add_tscore(subset_df, group_col=score_col),
+            group_col=score_col)
+    else:
+        scored_df = core.add_minmax(core.add_tscore(agg_df))
 
-    base = core.add_minmax(
-        core.add_tscore(subset, group_col=score_group_col),
-        group_col=score_group_col)
-else:
-    subset = agg
-    score_group_col = None
-    base = core.add_minmax(core.add_tscore(subset))
+    return scored_df, score_col
+
+
+base, score_group_col = build_scored_base(
+    raw, denom, sido_actual, level_col, group if is_sgg else "전체")
 
 # 점수는 전체 비교집단 기준으로 계산한 뒤, 시각화 대상은 표시 단계에서만 필터링
 display_base = base
@@ -216,26 +229,26 @@ if is_sgg and visual_target != "전체":
         display_base = base[base["인구규모군"].astype(str) == visual_target]
 
 
-def build_scores_for_current_group(scored):
-    """분야·종합 T점수도 현재 비교집단 안에서 재표준화한다."""
+@st.cache_data(show_spinner=False)
+def build_scores_cached(scored, group_col_arg=None):
+    """이미 표준화된 지표에서 부문·종합 점수를 계산하고 결과를 캐시한다."""
     field_scores, total_scores = core.build_field_total_scores(scored)
-    if not is_sgg or score_group_col is None:
+    if group_col_arg is None:
         return field_scores, total_scores
 
-    region_group = (scored.drop_duplicates("지역")[["지역", score_group_col]]
-                    .dropna(subset=[score_group_col]))
+    region_group = (scored.drop_duplicates("지역")[["지역", group_col_arg]]
+                    .dropna(subset=[group_col_arg]))
 
     field_scores = field_scores.merge(region_group, on="지역", how="left")
     total_scores = total_scores.merge(region_group, on="지역", how="left")
 
     def _t_within_group(df, item_col=None):
-        keys = [score_group_col] + ([item_col] if item_col else [])
+        keys = [group_col_arg] + ([item_col] if item_col else [])
         g = df.groupby(keys, observed=True)["T원점수"]
         mean = g.transform("mean")
         sd = g.transform("std")
         z = (df["T원점수"] - mean) / sd.replace(0, np.nan)
         df["T점수"] = 50 + 10 * z
-        # 비교집단 내 분산이 0인 경우 값이 있는 지역은 50점
         zero = sd.eq(0) & df["T원점수"].notna()
         df.loc[zero, "T점수"] = 50.0
         df["백분위_T"] = df.groupby(keys, observed=True)["T점수"].rank(pct=True) * 100
@@ -245,6 +258,12 @@ def build_scores_for_current_group(scored):
     field_scores = _t_within_group(field_scores, "항목")
     total_scores = _t_within_group(total_scores)
     return field_scores, total_scores
+
+
+def build_scores_for_current_group(scored):
+    """현재 비교집단의 캐시된 부문·종합 점수를 반환한다."""
+    group_col_arg = score_group_col if is_sgg else None
+    return build_scores_cached(scored, group_col_arg)
 
 
 # ── 현재 시각화 항목을 공통 형식(sub)으로 구성
@@ -501,8 +520,9 @@ if not is_sgg:
             sgg_view = raw.copy()
         hv = sgg_view[sgg_view["지표명"] == ind].dropna(subset=[mode]).copy()
     else:
-        sgg_scored = core.add_minmax(core.add_tscore(raw))
-        sgg_field, sgg_total = core.build_field_total_scores(sgg_scored)
+        # 전국 시군구 기준 점수도 캐시하여 시각화 항목 변경 시 재계산하지 않는다.
+        sgg_scored, _ = build_scored_base(raw, denom, sido_actual, None, "전국")
+        sgg_field, sgg_total = build_scores_cached(sgg_scored, None)
         hv = (sgg_field[sgg_field["항목"] == cat].copy()
               if metric_type == "부문점수" else sgg_total.copy())
         hv["Min-Max"] = hv["Min-Max점수"]
